@@ -15,7 +15,40 @@ import { useAsync } from "../hooks/useAsync.js";
 import type { WalletState } from "../hooks/useWalletConnection.js";
 import { ErrorBanner } from "./ErrorBanner.js";
 
-const KEY_STORAGE = "zentrixpay-provider-api-key";
+const KEY_SESSION = "zentrixpay-provider-api-key";
+const KEY_LOCAL = "zentrixpay-provider-api-key";
+
+/**
+ * Read back a stored key. Session storage takes priority (set during this tab's
+ * session). Falls back to localStorage only when the user previously ticked
+ * "remember me".
+ */
+function readStoredKey(): string {
+  try {
+    return sessionStorage.getItem(KEY_SESSION) ?? localStorage.getItem(KEY_LOCAL) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Persist the key. If `remember` is true the key is also written to
+ * localStorage so it survives the tab being closed; otherwise only
+ * sessionStorage is used and the key is forgotten when the tab closes.
+ */
+function storeKey(key: string | null, remember = false): void {
+  try {
+    if (key) {
+      sessionStorage.setItem(KEY_SESSION, key);
+      if (remember) localStorage.setItem(KEY_LOCAL, key);
+    } else {
+      sessionStorage.removeItem(KEY_SESSION);
+      localStorage.removeItem(KEY_LOCAL);
+    }
+  } catch {
+    // Storage unavailable (private mode): the key just won't survive a reload.
+  }
+}
 
 const inputClass =
   "w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100";
@@ -25,23 +58,6 @@ const secondaryButton =
   "rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-60 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700";
 const card =
   "rounded-xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-800";
-
-function readStoredKey(): string {
-  try {
-    return localStorage.getItem(KEY_STORAGE) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function storeKey(key: string | null): void {
-  try {
-    if (key) localStorage.setItem(KEY_STORAGE, key);
-    else localStorage.removeItem(KEY_STORAGE);
-  } catch {
-    // Storage unavailable (private mode): the key just won't survive a reload.
-  }
-}
 
 function Field({
   label,
@@ -70,11 +86,18 @@ function Field({
 
 // ── Getting an API key ───────────────────────────────────────────────────────
 
-function ProviderAccess({ wallet, onKey }: { wallet: WalletState; onKey: (key: string) => void }) {
+function ProviderAccess({
+  wallet,
+  onKey,
+}: {
+  wallet: WalletState;
+  onKey: (key: string, remember: boolean) => void;
+}) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [walletAddress, setWalletAddress] = useState(wallet.address ?? "");
   const [pasted, setPasted] = useState("");
+  const [remember, setRemember] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newKey, setNewKey] = useState<string | null>(null);
@@ -109,7 +132,18 @@ function ProviderAccess({ wallet, onKey }: { wallet: WalletState; onKey: (key: s
         <code className="mb-4 block break-all rounded-lg bg-gray-100 p-3 text-xs dark:bg-gray-900 dark:text-gray-100">
           {newKey}
         </code>
-        <button className={primaryButton} onClick={() => onKey(newKey)}>
+        <label className="mb-4 flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+          <input
+            type="checkbox"
+            checked={remember}
+            onChange={(e) => setRemember(e.target.checked)}
+          />
+          Remember me — keep my key after closing this tab
+          <span className="text-xs text-gray-400 dark:text-gray-500">
+            (stored in localStorage; uncheck for session-only)
+          </span>
+        </label>
+        <button className={primaryButton} onClick={() => onKey(newKey, remember)}>
           I saved it — continue
         </button>
       </div>
@@ -170,7 +204,7 @@ function ProviderAccess({ wallet, onKey }: { wallet: WalletState; onKey: (key: s
         className={card}
         onSubmit={(e) => {
           e.preventDefault();
-          if (pasted.trim()) onKey(pasted.trim());
+          if (pasted.trim()) onKey(pasted.trim(), remember);
         }}
       >
         <h3 className="mb-1 font-semibold text-gray-900 dark:text-gray-100">Already a provider?</h3>
@@ -186,6 +220,19 @@ function ProviderAccess({ wallet, onKey }: { wallet: WalletState; onKey: (key: s
             className={`${inputClass} font-mono`}
           />
         </Field>
+        <label className="mb-4 flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+          <input
+            type="checkbox"
+            checked={remember}
+            onChange={(e) => setRemember(e.target.checked)}
+          />
+          Remember me — keep my key after closing this tab
+        </label>
+        <p className="mb-4 text-xs text-gray-400 dark:text-gray-500">
+          By default your key is stored only for this session and forgotten when the tab closes.
+          Tick "Remember me" to persist it in localStorage across sessions. Note: any script on this
+          origin can read localStorage; sessionStorage is isolated to this tab.
+        </p>
         <button className={primaryButton}>Open dashboard</button>
       </form>
     </div>
@@ -353,6 +400,169 @@ function NewApiForm({ apiKey, onCreated }: { apiKey: string; onCreated: () => vo
   );
 }
 
+// ── Ownership verification instructions ─────────────────────────────────────
+
+function CopyButton({
+  text,
+  label,
+  onCopy,
+}: {
+  text: string;
+  label: string;
+  onCopy: (t: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="ml-1 text-xs text-indigo-600 underline dark:text-indigo-400"
+      onClick={() => onCopy(text)}
+      aria-label={`Copy ${label}`}
+    >
+      copy
+    </button>
+  );
+}
+
+function downloadTxt(content: string) {
+  const blob = new Blob([content], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "zentrixpay.txt";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function OwnershipInstructions({
+  api,
+  busy,
+  onVerify,
+  onCopy,
+}: {
+  api: OwnerApi;
+  busy: string | null;
+  onVerify: () => void;
+  onCopy: (text: string) => void;
+}) {
+  const { url, expectedContent } = api.ownershipVerification;
+  const [showSnippets, setShowSnippets] = useState(false);
+
+  const nginxSnippet = `location = /.well-known/zentrixpay.txt {
+  add_header Content-Type text/plain;
+  return 200 "${expectedContent}";
+}`;
+
+  const expressSnippet = `app.get('/.well-known/zentrixpay.txt', (_req, res) => {
+  res.type('text/plain').send('${expectedContent}');
+});`;
+
+  const vercelJson = `{
+  "headers": [
+    {
+      "source": "/.well-known/(.*)",
+      "headers": [{ "key": "Content-Type", "value": "text/plain" }]
+    }
+  ]
+}`;
+
+  return (
+    <div className="mb-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-900/20 dark:text-amber-200">
+      <p className="mb-2 font-medium">Verify ownership to list this API</p>
+      <p className="mb-1">Serve the file below at:</p>
+      <p className="mb-2 flex flex-wrap items-center gap-1 break-all font-mono text-xs">
+        {url}
+        <CopyButton text={url} label="verification URL" onCopy={onCopy} />
+      </p>
+
+      <p className="mb-1">File contents (one line):</p>
+      <div className="mb-2 flex flex-wrap items-start gap-2">
+        <code className="flex-1 break-all rounded bg-white/70 p-2 text-xs dark:bg-black/30">
+          {expectedContent}
+        </code>
+        <div className="flex shrink-0 flex-col gap-1">
+          <CopyButton text={expectedContent} label="verification token" onCopy={onCopy} />
+          <button
+            type="button"
+            className="text-xs text-indigo-600 underline dark:text-indigo-400"
+            onClick={() => downloadTxt(expectedContent)}
+          >
+            download
+          </button>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        className="mb-3 text-xs text-indigo-600 underline dark:text-indigo-400"
+        onClick={() => setShowSnippets((v) => !v)}
+      >
+        {showSnippets ? "Hide server snippets" : "Show server snippets"}
+      </button>
+
+      {showSnippets && (
+        <div className="mb-3 flex flex-col gap-3">
+          {/* nginx */}
+          <div>
+            <p className="mb-1 font-medium">nginx</p>
+            <div className="flex items-start gap-2">
+              <pre className="flex-1 overflow-x-auto rounded bg-white/70 p-2 text-xs dark:bg-black/30">
+                {nginxSnippet}
+              </pre>
+              <CopyButton text={nginxSnippet} label="nginx snippet" onCopy={onCopy} />
+            </div>
+          </div>
+
+          {/* Express */}
+          <div>
+            <p className="mb-1 font-medium">Express / Node</p>
+            <div className="flex items-start gap-2">
+              <pre className="flex-1 overflow-x-auto rounded bg-white/70 p-2 text-xs dark:bg-black/30">
+                {expressSnippet}
+              </pre>
+              <CopyButton text={expressSnippet} label="Express snippet" onCopy={onCopy} />
+            </div>
+          </div>
+
+          {/* Vercel */}
+          <div>
+            <p className="mb-1 font-medium">
+              Vercel — put the token in <code>public/.well-known/zentrixpay.txt</code>
+            </p>
+            <div className="flex items-start gap-2">
+              <pre className="flex-1 overflow-x-auto rounded bg-white/70 p-2 text-xs dark:bg-black/30">
+                {expectedContent}
+              </pre>
+              <div className="flex shrink-0 flex-col gap-1">
+                <CopyButton text={expectedContent} label="Vercel file content" onCopy={onCopy} />
+                <button
+                  type="button"
+                  className="text-xs text-indigo-600 underline dark:text-indigo-400"
+                  onClick={() => downloadTxt(expectedContent)}
+                >
+                  download
+                </button>
+              </div>
+            </div>
+            <p className="mt-1 text-xs">
+              If serving via rewrites, add to <code>vercel.json</code>:
+            </p>
+            <div className="mt-1 flex items-start gap-2">
+              <pre className="flex-1 overflow-x-auto rounded bg-white/70 p-2 text-xs dark:bg-black/30">
+                {vercelJson}
+              </pre>
+              <CopyButton text={vercelJson} label="vercel.json snippet" onCopy={onCopy} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      <button className={secondaryButton} disabled={busy !== null} onClick={onVerify}>
+        {busy === "Verify" ? "Checking…" : "Verify ownership"}
+      </button>
+    </div>
+  );
+}
+
 // ── Managing one API ─────────────────────────────────────────────────────────
 
 function StatsPanel({ stats }: { stats: ApiStats }) {
@@ -490,20 +700,12 @@ function ApiCard({
       </dl>
 
       {!api.ownershipVerified && (
-        <div className="mb-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-900/20 dark:text-amber-200">
-          <p className="mb-1">To list this API, serve this line at</p>
-          <p className="mb-1 break-all font-mono text-xs">{api.ownershipVerification.url}</p>
-          <code className="mb-2 block break-all rounded bg-white/70 p-2 text-xs dark:bg-black/30">
-            {api.ownershipVerification.expectedContent}
-          </code>
-          <button
-            className={secondaryButton}
-            disabled={busy !== null}
-            onClick={() => run("Verify", () => verifyApiOwnership(apiKey, api.id))}
-          >
-            {busy === "Verify" ? "Checking…" : "Verify ownership"}
-          </button>
-        </div>
+        <OwnershipInstructions
+          api={api}
+          busy={busy}
+          onVerify={() => run("Verify", () => verifyApiOwnership(apiKey, api.id))}
+          onCopy={onCopy}
+        />
       )}
 
       <div className="flex flex-wrap items-end gap-2">
@@ -582,8 +784,8 @@ export function ProviderDashboard({
     [apiKey, refresh],
   );
 
-  function changeKey(key: string | null) {
-    storeKey(key);
+  function changeKey(key: string | null, remember = false) {
+    storeKey(key, remember);
     setApiKey(key ?? "");
     setLocal({});
   }
