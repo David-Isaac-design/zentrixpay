@@ -10,6 +10,7 @@ import {
   createApi,
   getApiById,
   getApiStats,
+  getApiTimeSeries,
   getOwnedApi,
   listPublicApis,
   listPublisherApis,
@@ -129,6 +130,19 @@ router.get("/apis/:id/stats", apiKeyAuth, async (req, res) => {
       listRecentCalls(api.id, 50),
     ]);
     res.json({ apiId: api.id, ...totals, recentCalls });
+  } catch (err) {
+    sendServiceError(res, err);
+  }
+});
+
+// GET /apis/:id/stats/time-series?days=7|30|90 — per-day calls and revenue (owner)
+router.get("/apis/:id/stats/time-series", apiKeyAuth, async (req, res) => {
+  try {
+    const api = await getOwnedApi(req.params.id as string, req.publisher!.id);
+    const rawDays = Number(req.query.days);
+    const days = [7, 30, 90].includes(rawDays) ? (rawDays as 7 | 30 | 90) : 30;
+    const series = await getApiTimeSeries(api.id, days);
+    res.json({ apiId: api.id, days, series });
   } catch (err) {
     sendServiceError(res, err);
   }

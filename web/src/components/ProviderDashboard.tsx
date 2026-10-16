@@ -14,6 +14,7 @@ import {
 import { useAsync } from "../hooks/useAsync.js";
 import type { WalletState } from "../hooks/useWalletConnection.js";
 import { ErrorBanner } from "./ErrorBanner.js";
+import { StatsCharts } from "./StatsCharts.js";
 
 const KEY_STORAGE = "zentrixpay-provider-api-key";
 
@@ -353,7 +354,231 @@ function NewApiForm({ apiKey, onCreated }: { apiKey: string; onCreated: () => vo
   );
 }
 
-// ── Managing one API ─────────────────────────────────────────────────────────
+// ── Editing an existing API ──────────────────────────────────────────────────
+
+function EditApiForm({
+  api,
+  apiKey,
+  onSaved,
+  onCancel,
+}: {
+  api: OwnerApi;
+  apiKey: string;
+  onSaved: (updated: OwnerApi) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(api.name);
+  const [description, setDescription] = useState(api.description ?? "");
+  const [upstreamUrl, setUpstreamUrl] = useState(api.upstreamUrl);
+  const [price, setPrice] = useState(api.price);
+  const [methods, setMethods] = useState<HttpMethod[]>(api.allowedMethods as HttpMethod[]);
+  const [headerName, setHeaderName] = useState(api.upstreamHeaderName ?? "");
+  const [headerValue, setHeaderValue] = useState("");
+  const [clearSecret, setClearSecret] = useState(false);
+  const [tags, setTags] = useState(api.tags.join(", "));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function toggleMethod(m: HttpMethod) {
+    setMethods((prev) => (prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m]));
+  }
+
+  // Detect upstream domain change (ownership re-verification required)
+  let domainChanged = false;
+  try {
+    domainChanged =
+      upstreamUrl.trim() !== "" && new URL(upstreamUrl).origin !== new URL(api.upstreamUrl).origin;
+  } catch {
+    // Invalid URL; server will reject it
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      let upstreamHeader: { name: string; value: string } | null | undefined;
+      if (clearSecret) {
+        upstreamHeader = null; // explicit null clears it
+      } else if (headerName && headerValue) {
+        upstreamHeader = { name: headerName, value: headerValue };
+      }
+      // undefined → don't touch the existing secret
+
+      const updated = await updateApi(apiKey, api.id, {
+        name,
+        description: description || null,
+        upstreamUrl,
+        price,
+        allowedMethods: methods,
+        upstreamHeader,
+        tags: tags
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean),
+      });
+      onSaved(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save changes");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className={`${card} mt-3`} onSubmit={submit}>
+      <h4 className="mb-4 font-semibold text-gray-900 dark:text-gray-100">Edit API</h4>
+      <div className="grid gap-x-4 md:grid-cols-2">
+        <Field label="Name" htmlFor={`edit-name-${api.id}`}>
+          <input
+            id={`edit-name-${api.id}`}
+            required
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className={inputClass}
+          />
+        </Field>
+        <Field label="Price per call (USDC)" htmlFor={`edit-price-${api.id}`}>
+          <input
+            id={`edit-price-${api.id}`}
+            required
+            inputMode="decimal"
+            value={price}
+            onChange={(e) => setPrice(e.target.value)}
+            className={inputClass}
+          />
+        </Field>
+      </div>
+      <Field
+        label="Upstream URL"
+        htmlFor={`edit-upstream-${api.id}`}
+        hint="Your real API base URL. Callers never see it."
+      >
+        <input
+          id={`edit-upstream-${api.id}`}
+          type="url"
+          required
+          value={upstreamUrl}
+          onChange={(e) => setUpstreamUrl(e.target.value)}
+          className={`${inputClass} font-mono`}
+        />
+      </Field>
+      {domainChanged && (
+        <div
+          role="alert"
+          className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-900/20 dark:text-amber-200"
+        >
+          ⚠ Changing the upstream domain will un-list this API and require ownership verification
+          again.
+        </div>
+      )}
+      <Field label="Description" htmlFor={`edit-desc-${api.id}`}>
+        <textarea
+          id={`edit-desc-${api.id}`}
+          rows={2}
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          className={inputClass}
+        />
+      </Field>
+      <fieldset className="mb-3">
+        <legend className="mb-1 text-sm font-medium text-gray-700 dark:text-gray-200">
+          Allowed methods
+        </legend>
+        <div className="flex flex-wrap gap-3">
+          {HTTP_METHODS.map((m) => (
+            <label
+              key={m}
+              className="flex items-center gap-1 font-mono text-sm text-gray-700 dark:text-gray-200"
+            >
+              <input
+                type="checkbox"
+                checked={methods.includes(m)}
+                onChange={() => toggleMethod(m)}
+              />
+              {m}
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      {/* Secret header — only update if user enters a new value or explicitly clears it */}
+      <div className="mb-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+        <p className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-200">
+          Secret header{api.hasUpstreamSecret ? " (currently set)" : ""}
+        </p>
+        <div className="grid gap-x-4 md:grid-cols-2">
+          <Field
+            label="Header name"
+            htmlFor={`edit-hname-${api.id}`}
+            hint="e.g. x-api-key. Leave blank to keep existing."
+          >
+            <input
+              id={`edit-hname-${api.id}`}
+              placeholder={api.upstreamHeaderName ?? "x-api-key"}
+              value={headerName}
+              onChange={(e) => setHeaderName(e.target.value)}
+              className={`${inputClass} font-mono`}
+              disabled={clearSecret}
+            />
+          </Field>
+          <Field label="Header value" htmlFor={`edit-hvalue-${api.id}`} hint="Stored encrypted.">
+            <input
+              id={`edit-hvalue-${api.id}`}
+              type="password"
+              placeholder="New value (leave blank to keep)"
+              value={headerValue}
+              onChange={(e) => setHeaderValue(e.target.value)}
+              className={`${inputClass} font-mono`}
+              disabled={clearSecret}
+            />
+          </Field>
+        </div>
+        {api.hasUpstreamSecret && (
+          <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
+            <input
+              type="checkbox"
+              checked={clearSecret}
+              onChange={(e) => {
+                setClearSecret(e.target.checked);
+                if (e.target.checked) {
+                  setHeaderName("");
+                  setHeaderValue("");
+                }
+              }}
+            />
+            Remove secret header
+          </label>
+        )}
+      </div>
+
+      <Field label="Tags" htmlFor={`edit-tags-${api.id}`} hint="Comma separated, up to 10.">
+        <input
+          id={`edit-tags-${api.id}`}
+          value={tags}
+          onChange={(e) => setTags(e.target.value)}
+          placeholder="weather, geo"
+          className={inputClass}
+        />
+      </Field>
+
+      {error && (
+        <p role="alert" className="mb-3 text-sm text-red-600 dark:text-red-400">
+          {error}
+        </p>
+      )}
+
+      <div className="flex gap-2">
+        <button className={primaryButton} disabled={busy || methods.length === 0}>
+          {busy ? "Saving…" : "Save changes"}
+        </button>
+        <button type="button" className={secondaryButton} onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
 
 function StatsPanel({ stats }: { stats: ApiStats }) {
   const tiles = [
@@ -424,6 +649,7 @@ function ApiCard({
   const [error, setError] = useState<string | null>(null);
   const [price, setPrice] = useState(api.price);
   const [stats, setStats] = useState<ApiStats | null>(null);
+  const [editing, setEditing] = useState(false);
 
   async function run(label: string, action: () => Promise<OwnerApi | void>) {
     setBusy(label);
@@ -551,6 +777,13 @@ function ApiCard({
         >
           {stats ? "Hide stats" : busy === "Stats" ? "Loading…" : "Stats"}
         </button>
+        <button
+          className={secondaryButton}
+          disabled={busy !== null}
+          onClick={() => setEditing((v) => !v)}
+        >
+          {editing ? "Cancel edit" : "Edit"}
+        </button>
       </div>
 
       {error && (
@@ -558,7 +791,19 @@ function ApiCard({
           {error}
         </p>
       )}
+      {editing && (
+        <EditApiForm
+          api={api}
+          apiKey={apiKey}
+          onSaved={(updated) => {
+            onChanged(updated);
+            setEditing(false);
+          }}
+          onCancel={() => setEditing(false)}
+        />
+      )}
       {stats && <StatsPanel stats={stats} />}
+      {stats && <StatsCharts apiId={api.id} apiKey={apiKey} />}
     </li>
   );
 }

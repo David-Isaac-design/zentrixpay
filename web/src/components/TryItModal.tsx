@@ -1,7 +1,10 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import type { PublicApi } from "../api/apis.js";
 import type { WalletState } from "../hooks/useWalletConnection.js";
+import { useUsdcBalance } from "../hooks/useUsdcBalance.js";
+import { checkNetwork } from "../hooks/useNetworkCheck.js";
 import { callPaidApi, callUrl, type ApiCallResult } from "../lib/x402Call.js";
+import { networks } from "@zentrixpay/registry-client";
 
 interface Props {
   api: PublicApi;
@@ -23,6 +26,119 @@ function prettyBody(result: ApiCallResult): string {
   return result.body;
 }
 
+// ── Code snippets ────────────────────────────────────────────────────────────
+
+type SnippetLang = "curl" | "javascript" | "python";
+
+function buildCurl(method: string, url: string, body: string): string {
+  const lines = [`curl -X ${method} \\`, `  "${url}"`];
+  const hasBody = method !== "GET" && body.trim();
+  if (hasBody) {
+    lines.push(`  -H "Content-Type: application/json" \\`);
+    lines.push(`  -d '${body.trim()}'`);
+  }
+  return lines.join(" \\\n");
+}
+
+function buildJavaScript(method: string, url: string, body: string): string {
+  const hasBody = method !== "GET" && body.trim();
+  return `import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
+import { ExactStellarScheme } from "@x402/stellar/exact/client";
+import { createFreighterSigner } from "./x402Buy.js"; // your signer
+
+const client = new x402Client().register(
+  "testnet", // or "mainnet"
+  new ExactStellarScheme(createFreighterSigner(walletAddress, networkPassphrase)),
+);
+const paidFetch = wrapFetchWithPayment(fetch, client);
+
+const res = await paidFetch("${url}", {
+  method: "${method}",${hasBody ? `\n  headers: { "Content-Type": "application/json" },\n  body: JSON.stringify(${body.trim() || "{}"}),` : ""}
+});
+const data = await res.json();
+console.log(data);`;
+}
+
+function buildPython(method: string, url: string, body: string): string {
+  const hasBody = method !== "GET" && body.trim();
+  return `# pip install x402-python stellar-sdk
+from x402.stellar import FreighterStellarClient
+from x402 import X402Client
+
+client = X402Client(
+    network="testnet",  # or "mainnet"
+    signer=FreighterStellarClient(),
+)
+
+response = client.request(
+    "${url}",
+    method="${method}",${hasBody ? `\n    json=${body.trim() || "{}"},` : ""}
+)
+print(response.json())`;
+}
+
+function CodeSnippetPanel({ method, url, body }: { method: string; url: string; body: string }) {
+  const [lang, setLang] = useState<SnippetLang>("curl");
+  const [copied, setCopied] = useState(false);
+
+  const snippet =
+    lang === "curl"
+      ? buildCurl(method, url, body)
+      : lang === "javascript"
+        ? buildJavaScript(method, url, body)
+        : buildPython(method, url, body);
+
+  const langs: { id: SnippetLang; label: string }[] = [
+    { id: "curl", label: "curl" },
+    { id: "javascript", label: "JavaScript" },
+    { id: "python", label: "Python" },
+  ];
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(snippet);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard unavailable
+    }
+  }
+
+  return (
+    <div className="mt-4 rounded-lg border border-gray-200 dark:border-gray-700">
+      <div className="flex items-center justify-between gap-2 rounded-t-lg border-b border-gray-200 bg-gray-50 px-3 py-2 dark:border-gray-700 dark:bg-gray-900">
+        <div className="flex gap-1" role="tablist" aria-label="Code language">
+          {langs.map(({ id, label }) => (
+            <button
+              key={id}
+              role="tab"
+              aria-selected={lang === id}
+              onClick={() => setLang(id)}
+              className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${
+                lang === id
+                  ? "bg-indigo-600 text-white"
+                  : "text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={copy}
+          aria-label="Copy code snippet"
+          className="rounded px-2 py-0.5 text-xs text-gray-500 hover:bg-gray-200 dark:text-gray-400 dark:hover:bg-gray-700"
+        >
+          {copied ? "Copied!" : "Copy"}
+        </button>
+      </div>
+      <pre className="max-h-56 overflow-auto rounded-b-lg bg-gray-900 p-3 text-xs leading-relaxed text-gray-100">
+        {snippet}
+      </pre>
+    </div>
+  );
+}
+
 export function TryItModal({ api, wallet, onClose }: Props) {
   const [method, setMethod] = useState<string>(api.allowedMethods[0] ?? "GET");
   const [path, setPath] = useState("");
@@ -31,12 +147,35 @@ export function TryItModal({ api, wallet, onClose }: Props) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ApiCallResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [networkWarning, setNetworkWarning] = useState<string | null>(null);
 
   const url = callUrl(api.proxyUrl, path, query);
   const canSendBody = method !== "GET";
 
+  // Fetch USDC balance for the connected wallet
+  const balanceState = useUsdcBalance(wallet.address);
+  const balance = balanceState.status === "ready" ? balanceState.balance : null;
+  const price = parseFloat(api.price);
+  const lowBalance = balance !== null && parseFloat(balance) < price;
+
+  // Check network mismatch on connect
+  useEffect(() => {
+    if (wallet.status !== "connected") {
+      setNetworkWarning(null);
+      return;
+    }
+    const raw = (import.meta.env.VITE_STELLAR_NETWORK as string | undefined)?.trim().toLowerCase();
+    const preset =
+      raw === "public" || raw === "mainnet" || raw === "pubnet"
+        ? networks.mainnet
+        : networks.testnet;
+    checkNetwork(preset.networkPassphrase).then((warning) => setNetworkWarning(warning));
+  }, [wallet.status]);
+
+  const payBlocked = lowBalance || Boolean(networkWarning);
+
   async function send() {
-    if (!wallet.address) return;
+    if (!wallet.address || payBlocked) return;
     setBusy(true);
     setError(null);
     setResult(null);
@@ -149,22 +288,73 @@ export function TryItModal({ api, wallet, onClose }: Props) {
           {method} {url}
         </p>
 
-        {wallet.status !== "connected" ? (
-          <button
-            onClick={wallet.connect}
-            className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
-          >
-            Connect Freighter to call this API
-          </button>
-        ) : (
-          <button
-            onClick={send}
-            disabled={busy}
-            className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
-          >
-            {busy ? "Paying and calling…" : `Pay ${api.price} USDC and send`}
-          </button>
-        )}
+        <CodeSnippetPanel method={method} url={url} body={body} />
+
+        <div className="mt-4">
+          {wallet.status !== "connected" ? (
+            <button
+              onClick={wallet.connect}
+              className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            >
+              Connect Freighter to call this API
+            </button>
+          ) : (
+            <>
+              {/* Balance indicator */}
+              <div className="mb-3 flex items-center gap-2 text-sm">
+                <span className="text-gray-500 dark:text-gray-400">Wallet balance:</span>
+                {balanceState.status === "loading" && (
+                  <span className="text-gray-400 dark:text-gray-500">loading…</span>
+                )}
+                {balanceState.status === "ready" && (
+                  <span
+                    className={
+                      lowBalance
+                        ? "font-medium text-red-600 dark:text-red-400"
+                        : "font-medium text-gray-900 dark:text-gray-100"
+                    }
+                  >
+                    {parseFloat(balance!).toFixed(2)} USDC
+                  </span>
+                )}
+                {balanceState.status === "error" && (
+                  <span className="text-gray-400 dark:text-gray-500" title={balanceState.message}>
+                    unavailable
+                  </span>
+                )}
+              </div>
+
+              {/* Network mismatch warning */}
+              {networkWarning && (
+                <p
+                  role="alert"
+                  className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-900/30 dark:text-amber-300"
+                >
+                  {networkWarning}
+                </p>
+              )}
+
+              {/* Low balance warning */}
+              {lowBalance && !networkWarning && (
+                <p
+                  role="alert"
+                  className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-900/30 dark:text-red-300"
+                >
+                  Insufficient balance — you need at least {api.price} USDC to pay for this call.
+                </p>
+              )}
+
+              <button
+                onClick={send}
+                disabled={busy || payBlocked}
+                aria-disabled={busy || payBlocked}
+                className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {busy ? "Paying and calling…" : `Pay ${api.price} USDC and send`}
+              </button>
+            </>
+          )}
+        </div>
 
         {error && (
           <p
