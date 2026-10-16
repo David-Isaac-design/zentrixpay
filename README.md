@@ -1,157 +1,85 @@
-# ZentrixPay
+# x402 Gateway
 
-ZentrixPay is a pay-per-call gateway for HTTP APIs, built on Stellar. A provider puts an API behind ZentrixPay and sets a price per call in USDC. Anyone who calls it — a person in a browser, a script, or an AI agent — pays for each call with the [x402 protocol](docs/GLOSSARY.md#x402), and the USDC goes straight to the provider's Stellar wallet.
+A payment-gated API gateway that lets you charge for any HTTP endpoint using the [x402 protocol](https://x402.org). Callers pay per request with USDC on Base; the gateway verifies the payment on-chain and proxies the request to your upstream service.
 
-No accounts, no API-key signups, no subscriptions. One HTTP request, one payment.
+## Features
 
-## How a call works
+- **Pay-per-call HTTP endpoints** — wrap any upstream API behind a `402 Payment Required` handshake
+- **MCP server** — expose paid tools to agents (Claude Code, Codex, and any MCP client)
+- **On-chain verification** — payments are verified against Base mainnet/testnet before the request is proxied
+- **Per-route pricing** — configure price, network, and payee per endpoint
+- **Call history** — every paid call is recorded and queryable
 
+## Quick start
+
+```bash
+npm install
+cp .env.example .env
+# edit .env with your RPC URL, payee address, and upstream URLs
+npm run dev
 ```
-caller ──GET /api/<id>/weather?city=lagos──▶ ZentrixPay
-       ◀──────── 402 Payment Required ─────── (price, payee, network)
-caller ──same request + signed USDC payment─▶ ZentrixPay ──forward──▶ provider's API
-       ◀──────────── API response ─────────── settle payment ◀──────── 200 OK
+
+The gateway listens on `http://localhost:3000` by default.
+
+## Configuration
+
+Routes are defined in `config/routes.json`:
+
+```json
+{
+  "routes": [
+    {
+      "path": "/api/weather",
+      "upstream": "https://api.example.com/weather",
+      "price": "0.001",
+      "network": "base-sepolia",
+      "payee": "0xYourAddress"
+    }
+  ]
+}
 ```
 
-1. The caller requests `https://<zentrixpay>/api/<id>/<path>`.
-2. ZentrixPay answers **402** with the price, the provider's wallet and the Stellar network.
-3. The caller signs a USDC payment and retries. Any x402 client does this automatically.
-4. ZentrixPay forwards the request to the provider's real API and returns the response.
-5. The payment settles on Stellar **only if the API answered with a status below 400**. Errors, timeouts and oversized responses are never charged.
-
-## For API providers
-
-1. **Register as a provider** — `POST /publishers` with your name, email and payout wallet. You get an API key (shown once).
-2. **Register your API** — `POST /apis` with:
-   - `name`, `description`, `price` (USDC per call)
-   - `upstreamUrl` — your real API's base URL. Callers never see it.
-   - `allowedMethods` — e.g. `["GET", "POST"]`
-   - `upstreamHeader` (optional) — a secret header ZentrixPay adds to every forwarded call, such as your own API key. It is stored AES-256-GCM encrypted.
-3. **Prove you own the domain** — serve the line you were given (`zentrixpay-verification=<token>`) at `https://<your-api-domain>/.well-known/zentrixpay.txt`, then `POST /apis/<id>/verify-ownership`. Your API is then listed.
-4. **Get paid** — share your proxy URL `https://<zentrixpay>/api/<id>`. `GET /apis/<id>/stats` shows calls, revenue, unique payers and latency.
-
-> **Lock your upstream down.** ZentrixPay never reveals your upstream URL, but if your API answers requests without the secret header, anyone who finds the URL can skip paying. Require the header you configured in `upstreamHeader`.
-
-All of this is also available in the web app (**Sell your API** tab) and through the MCP tools below.
-
-### API reference
-
-| Endpoint                          | Auth        | Description                                                     |
-| --------------------------------- | ----------- | --------------------------------------------------------------- |
-| `GET /apis?q=&limit=&offset=`     | —           | Catalog of listed APIs                                          |
-| `GET /apis/:id`                   | —           | One listed API: price, methods, payee, proxy URL                |
-| `ANY /api/:id/*`                  | x402        | A paid call, forwarded to the provider                          |
-| `POST /publishers`                | —           | Register as a provider; returns your API key once               |
-| `POST /apis`                      | `x-api-key` | Register an API                                                 |
-| `PATCH /apis/:id`                 | `x-api-key` | Change price, upstream, methods, secret header, tags or listing |
-| `POST /apis/:id/verify-ownership` | `x-api-key` | Check `/.well-known/zentrixpay.txt` and list the API            |
-| `GET /publishers/me/apis`         | `x-api-key` | Your APIs, listed or not                                        |
-| `GET /apis/:id/stats`             | `x-api-key` | Call counts, USDC revenue, unique payers, recent calls          |
-
-Changing an API's upstream to a different domain un-lists it until ownership is verified again.
+| Field      | Description                                              |
+| ---------- | -------------------------------------------------------- |
+| `path`     | Public path exposed by the gateway                       |
+| `upstream` | Upstream URL the request is proxied to after payment     |
+| `price`    | Price in USDC per call                                   |
+| `network`  | `base` or `base-sepolia`                                 |
+| `payee`    | Address that receives the payment                        |
 
 ## For callers
 
-- **Browser** — open the web app, connect [Freighter](https://www.freighter.app/), pick an API and use **Try it**. Each successful call is paid from your wallet.
-- **Code** — wrap `fetch` with an x402 client (`@x402/fetch` + `@x402/stellar`) and call the proxy URL like any other API.
-- **AI agents** — use the MCP server below.
-
-Try the 402 yourself:
+Every paid route responds with `402 Payment Required` until a valid payment is attached. The response includes a `PAYMENT-REQUIRED` header describing what to pay; retry the same request with a `PAYMENT-SIGNATURE` header and the gateway returns the upstream response plus a `PAYMENT-RESPONSE` header.
 
 ```bash
-curl -i http://localhost:4021/api/<id>
-# HTTP/1.1 402 Payment Required
-# PAYMENT-REQUIRED: eyJ4NDAy...   (base64: price, payee, network, scheme)
+# 1. First call — expect a 402 with payment instructions
+curl -i http://localhost:3000/api/weather
+
+# 2. Retry with the signed payment
+curl -i http://localhost:3000/api/weather \
+  -H "PAYMENT-SIGNATURE: <base64-encoded-payment-payload>"
 ```
+
+For a full walkthrough with real (redacted) testnet headers — decoding `PAYMENT-REQUIRED`, constructing the `PAYMENT-SIGNATURE`, and reading the `PAYMENT-RESPONSE` receipt — see **[docs/curl-402-walkthrough.md](docs/curl-402-walkthrough.md)**.
 
 ## MCP server
 
-The MCP server lets Claude Code, Codex or any MCP client find APIs, call them (paying per call from an agent wallet), and manage APIs as a provider.
-
-| Tool                              | What it does                                                      |
-| --------------------------------- | ----------------------------------------------------------------- |
-| `zentrixpay_setup_wallet`         | Create a Stellar agent wallet (sponsored, no XLM needed up front) |
-| `zentrixpay_wallet_info`          | Wallet address and USDC balance                                   |
-| `zentrixpay_list_apis`            | Search the API catalog                                            |
-| `zentrixpay_api_info`             | Price, methods and proxy URL for one API                          |
-| `zentrixpay_call`                 | Make a paid call (method, path, query, body, headers)             |
-| `zentrixpay_register`             | Register the agent as a provider                                  |
-| `zentrixpay_register_api`         | Register an API to sell                                           |
-| `zentrixpay_update_api`           | Change price, upstream, methods, secret header or listing         |
-| `zentrixpay_verify_api_ownership` | Verify the domain and list the API                                |
-| `zentrixpay_my_apis`              | Your APIs                                                         |
-| `zentrixpay_api_stats`            | Calls and earnings for one API                                    |
-| `zentrixpay_purchase_history`     | Paid calls this agent has made                                    |
-
-`zentrixpay_call` checks the wallet balance before paying, refuses methods the API does not accept, and stops at the auto-pay ceiling (`ZENTRIXPAY_MAX_AUTO_PAY_USDC`, 10 USDC by default) unless you pass `maxAutoPayUsdc`. On mainnet, calls and API changes need `confirmMainnet: true` (or `ZENTRIXPAY_ALLOW_MAINNET=1`).
+The gateway ships an MCP server that exposes paid routes as tools, so agents can discover and call them directly. Start it with:
 
 ```bash
-pnpm --filter @zentrixpay/mcp build
-
-# Claude Code
-claude mcp add zentrixpay -e ZENTRIXPAY_URL=http://localhost:4021 -- node /path/to/zentrixpay/mcp/dist/index.js
-
-# Codex
-codex mcp add zentrixpay --env ZENTRIXPAY_URL=http://localhost:4021 -- node /path/to/zentrixpay/mcp/dist/index.js
+npm run mcp
 ```
 
-Set `ZENTRIXPAY_URL` to your deployment; it defaults to `http://localhost:4021`. More client configs: [docs/mcp-client-configs.md](docs/mcp-client-configs.md).
+Tools include `list_paid_tools`, `call_paid_tool`, and `get_call_history`. Wallet setup, example prompts, and sample tool outputs for Claude Code and Codex are documented in **[docs/mcp-pay-per-call.md](docs/mcp-pay-per-call.md)**.
 
-## Running locally
-
-Requires Node.js 20+, pnpm 10 (`corepack enable`), a Postgres database, and Stellar testnet wallets (XLM from Friendbot, USDC from the [Circle faucet](https://faucet.circle.com)).
+## Development
 
 ```bash
-pnpm install
-cp server/.env.example server/.env   # fill in the values
-pnpm db:migrate
-pnpm dev:server                      # API on :4021
-pnpm dev:web                         # web app on :5173 (set VITE_API_URL=http://localhost:4021)
+npm run dev     # start the gateway with hot reload
+npm test        # run the test suite
+npm run lint    # lint the codebase
 ```
-
-Proxy settings in `server/.env`:
-
-| Variable                        | Default    | Description                                                               |
-| ------------------------------- | ---------- | ------------------------------------------------------------------------- |
-| `UPSTREAM_SECRET_KEY`           | _(unset)_  | 64 hex chars; encrypts providers' secret headers. Required to store them. |
-| `PROXY_MAX_REQUEST_BODY`        | `5mb`      | Largest request body forwarded upstream                                   |
-| `PROXY_MAX_RESPONSE_BYTES`      | `10485760` | Larger upstream responses fail with 502 and are not charged               |
-| `PROXY_DEFAULT_TIMEOUT_MS`      | `15000`    | Upstream timeout when the API sets none                                   |
-| `PROXY_MAX_TIMEOUT_MS`          | `25000`    | Ceiling for a provider's own timeout                                      |
-| `PROXY_ALLOW_PRIVATE_UPSTREAMS` | `false`    | Local development only: allow upstreams on localhost/private networks     |
-
-Payments are settled by the x402 facilitator (`FACILITATOR_URL`, default `https://www.x402.org/facilitator`, testnet fees sponsored).
-
-## Security
-
-The proxy makes requests to URLs that providers choose, so it guards against being turned against its own network:
-
-- Upstreams on loopback, private, link-local (including cloud metadata), and other reserved addresses are refused — at registration and again at connect time, so a domain that later re-resolves to a private address (DNS rebinding) is still blocked.
-- Redirects are not followed; paths that try to climb out of the upstream base (`..`, encoded slashes) are rejected.
-- Callers' cookies, payment and auth headers are stripped before forwarding; upstream cookies, CORS and x402 headers are stripped from responses.
-- Responses are size-capped and every call has a timeout.
-
-## Project structure
-
-```
-zentrixpay/
-  server/     Express API, x402 paywall, pay-per-call proxy, Postgres (Drizzle)
-  web/        React app: API catalog, try-it console, provider dashboard
-  mcp/        MCP server for AI agents
-  contract/   Soroban contracts
-  packages/   Shared Stellar network and registry client
-```
-
-## Status
-
-- Working: provider registration, API registration and ownership verification, the paid proxy with per-call x402 settlement, catalog, stats, web app and MCP tools.
-- Still in the tree from the original project: the file-vault endpoints (`/resources`, AI content verification, Supabase storage) and their configuration. They are being removed; until then the server still expects the Supabase and OpenRouter variables in `server/.env.example`.
-- Not yet built: per-endpoint pricing, prepaid call credits, streaming responses (responses are buffered until payment settles), mainnet deployment.
-
-## Credits
-
-ZentrixPay started as a fork of [MindVault](https://github.com/mind-vault-1/mindvault), a payment-protected vault for digital resources on Stellar.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT
