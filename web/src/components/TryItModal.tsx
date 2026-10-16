@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { PublicApi } from "../api/apis.js";
 import type { WalletState } from "../hooks/useWalletConnection.js";
 import { callPaidApi, callUrl, type ApiCallResult } from "../lib/x402Call.js";
@@ -23,7 +24,12 @@ function prettyBody(result: ApiCallResult): string {
   return result.body;
 }
 
+/** All focusable elements inside a container. */
+const FOCUSABLE =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export function TryItModal({ api, wallet, onClose }: Props) {
+  const { t } = useTranslation();
   const [method, setMethod] = useState<string>(api.allowedMethods[0] ?? "GET");
   const [path, setPath] = useState("");
   const [query, setQuery] = useState("");
@@ -31,6 +37,60 @@ export function TryItModal({ api, wallet, onClose }: Props) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ApiCallResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const dialogRef = useRef<HTMLDivElement>(null);
+  /** The element that had focus when the modal opened — we restore it on close. */
+  const previousFocusRef = useRef<Element | null>(null);
+
+  // Capture the previously focused element and focus the dialog on open.
+  useEffect(() => {
+    previousFocusRef.current = document.activeElement;
+    // Move focus into the dialog so screen readers announce it immediately.
+    dialogRef.current?.focus();
+
+    return () => {
+      // Restore focus to whatever triggered the modal.
+      (previousFocusRef.current as HTMLElement | null)?.focus();
+    };
+  }, []);
+
+  // Keyboard handler: Escape closes, Tab stays inside.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+
+      if (e.key !== "Tab") return;
+
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE));
+      if (focusable.length === 0) return;
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+
+      if (e.shiftKey) {
+        // Shift+Tab: wrap from first to last
+        if (document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        // Tab: wrap from last to first
+        if (document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
 
   const url = callUrl(api.proxyUrl, path, query);
   const canSendBody = method !== "GET";
@@ -49,7 +109,7 @@ export function TryItModal({ api, wallet, onClose }: Props) {
         ),
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "The call could not be completed.");
+      setError(err instanceof Error ? err.message : t("try_it.error_fallback"));
     } finally {
       setBusy(false);
     }
@@ -63,7 +123,12 @@ export function TryItModal({ api, wallet, onClose }: Props) {
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-4"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-6 shadow-xl dark:bg-gray-800">
+      {/* tabIndex={-1} lets us programmatically focus the container */}
+      <div
+        ref={dialogRef}
+        tabIndex={-1}
+        className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-6 shadow-xl dark:bg-gray-800 focus:outline-none"
+      >
         <div className="mb-4 flex items-start justify-between gap-4">
           <div>
             <h2
@@ -73,13 +138,12 @@ export function TryItModal({ api, wallet, onClose }: Props) {
               {api.name}
             </h2>
             <p className="text-sm text-gray-500 dark:text-gray-400">
-              {api.price} USDC per successful call, paid from your Freighter wallet. Failed calls
-              are not charged.
+              {t("try_it.price_notice", { price: api.price })}
             </p>
           </div>
           <button
             onClick={onClose}
-            aria-label="Close"
+            aria-label={t("try_it.close")}
             className="rounded-lg px-2 py-1 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700"
           >
             ✕
@@ -88,7 +152,7 @@ export function TryItModal({ api, wallet, onClose }: Props) {
 
         <div className="mb-3 flex gap-2">
           <label className="sr-only" htmlFor="try-method">
-            Method
+            {t("try_it.method_label")}
           </label>
           <select
             id="try-method"
@@ -101,13 +165,13 @@ export function TryItModal({ api, wallet, onClose }: Props) {
             ))}
           </select>
           <label className="sr-only" htmlFor="try-path">
-            Path
+            {t("try_it.path_label")}
           </label>
           <input
             id="try-path"
             value={path}
             onChange={(e) => setPath(e.target.value)}
-            placeholder="/path/under/the/api"
+            placeholder={t("try_it.path_placeholder")}
             className={`${inputClass} font-mono`}
           />
         </div>
@@ -116,13 +180,13 @@ export function TryItModal({ api, wallet, onClose }: Props) {
           className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200"
           htmlFor="try-query"
         >
-          Query string
+          {t("try_it.query_label")}
         </label>
         <input
           id="try-query"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="units=metric&lang=en"
+          placeholder={t("try_it.query_placeholder")}
           className={`${inputClass} mb-3 font-mono`}
         />
 
@@ -132,14 +196,14 @@ export function TryItModal({ api, wallet, onClose }: Props) {
               className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200"
               htmlFor="try-body"
             >
-              JSON body
+              {t("try_it.body_label")}
             </label>
             <textarea
               id="try-body"
               value={body}
               onChange={(e) => setBody(e.target.value)}
               rows={5}
-              placeholder='{"key": "value"}'
+              placeholder={t("try_it.body_placeholder")}
               className={`${inputClass} mb-3 font-mono`}
             />
           </>
@@ -154,7 +218,7 @@ export function TryItModal({ api, wallet, onClose }: Props) {
             onClick={wallet.connect}
             className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
           >
-            Connect Freighter to call this API
+            {t("try_it.connect_button")}
           </button>
         ) : (
           <button
@@ -162,7 +226,7 @@ export function TryItModal({ api, wallet, onClose }: Props) {
             disabled={busy}
             className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
           >
-            {busy ? "Paying and calling…" : `Pay ${api.price} USDC and send`}
+            {busy ? t("try_it.sending_button") : t("try_it.send_button", { price: api.price })}
           </button>
         )}
 
@@ -188,8 +252,10 @@ export function TryItModal({ api, wallet, onClose }: Props) {
                 {result.status}
               </span>
               <span className="text-gray-600 dark:text-gray-300">
-                {result.charged ? `Charged ${api.price} USDC` : "Not charged"} · {result.durationMs}{" "}
-                ms
+                {result.charged
+                  ? t("try_it.charged", { price: api.price })
+                  : t("try_it.not_charged")}{" "}
+                · {result.durationMs} ms
               </span>
               {result.explorerUrl && (
                 <a
@@ -198,7 +264,7 @@ export function TryItModal({ api, wallet, onClose }: Props) {
                   rel="noreferrer"
                   className="text-indigo-600 underline hover:no-underline dark:text-indigo-400"
                 >
-                  View payment
+                  {t("try_it.view_payment")}
                 </a>
               )}
             </div>
