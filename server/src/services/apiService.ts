@@ -45,6 +45,8 @@ export function toOwnerApi(api: ApiRow) {
     upstreamHeaderName: api.upstreamHeaderName,
     hasUpstreamSecret: Boolean(api.upstreamHeaderValueEnc),
     timeoutMs: api.timeoutMs,
+    payerAllowlist: api.payerAllowlist,
+    payerDenylist: api.payerDenylist,
     listed: api.listed,
     ownershipVerified: Boolean(api.ownershipVerifiedAt),
     ownershipVerification: {
@@ -103,6 +105,8 @@ export interface CreateApiInput {
   upstreamHeader?: { name: string; value: string };
   timeoutMs?: number;
   tags: string[];
+  payerAllowlist?: string[];
+  payerDenylist?: string[];
 }
 
 export async function createApi(input: CreateApiInput): Promise<ApiRow> {
@@ -118,6 +122,8 @@ export async function createApi(input: CreateApiInput): Promise<ApiRow> {
       allowedMethods: input.allowedMethods,
       timeoutMs: clampTimeout(input.timeoutMs),
       tags: input.tags,
+      payerAllowlist: input.payerAllowlist ?? null,
+      payerDenylist: input.payerDenylist ?? [],
       ownershipToken: randomBytes(16).toString("hex"),
       ...encryptedHeader(input.upstreamHeader),
     })
@@ -226,6 +232,8 @@ export interface UpdateApiInput {
   upstreamHeader?: { name: string; value: string } | null;
   timeoutMs?: number | null;
   tags?: string[];
+  payerAllowlist?: string[] | null;
+  payerDenylist?: string[];
   listed?: boolean;
 }
 
@@ -238,6 +246,8 @@ export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<Api
     allowedMethods: input.allowedMethods,
     timeoutMs: clampTimeout(input.timeoutMs),
     tags: input.tags,
+    payerAllowlist: input.payerAllowlist,
+    payerDenylist: input.payerDenylist,
     ...encryptedHeader(input.upstreamHeader),
   };
 
@@ -321,6 +331,7 @@ export interface RecordCallInput {
   path: string;
   responseStatus: number;
   durationMs: number;
+  txHash?: string | null;
 }
 
 export async function recordApiCall(input: RecordCallInput): Promise<void> {

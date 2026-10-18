@@ -146,6 +146,13 @@ const upstreamHeader = z
 
 const tagList = z.array(z.string().trim().min(1).max(32).toLowerCase()).max(10);
 
+export const PAYER_LIST_MAX = 500;
+
+const payerList = z
+  .array(z.string().regex(/^G[A-Z2-7]{55}$/, "payer lists must hold Stellar public keys (G...)"))
+  .max(PAYER_LIST_MAX)
+  .transform((list) => [...new Set(list)]);
+
 export const createApiSchema = z
   .object({
     name: z.string().trim().min(1).max(120),
@@ -157,6 +164,9 @@ export const createApiSchema = z
     upstreamHeader: upstreamHeader.optional(),
     timeoutMs: z.number().int().min(1000).optional(),
     tags: tagList.default([]),
+    // Only these wallets may call the API; omit to allow everyone.
+    payerAllowlist: payerList.optional(),
+    payerDenylist: payerList.default([]),
   })
   .strict();
 
@@ -171,6 +181,9 @@ export const updateApiSchema = z
     upstreamHeader: upstreamHeader.nullable().optional(),
     timeoutMs: z.number().int().min(1000).nullable().optional(),
     tags: tagList.optional(),
+    // null removes the allowlist, opening the API to every wallet again.
+    payerAllowlist: payerList.nullable().optional(),
+    payerDenylist: payerList.optional(),
     listed: z.boolean().optional(),
   })
   .strict();
