@@ -12,6 +12,8 @@
  */
 
 import type { ToolDefinition } from "./tools.js";
+import { assertWithinSessionSpendLimit, recordSessionSpend } from "./paymentCeiling.js";
+import { ZENTRIXPAY_CALL_OUTPUT_SCHEMA } from "./outputSchemas.js";
 
 const API_ID = {
   type: "string",
@@ -166,6 +168,7 @@ export const API_TOOL_DEFINITIONS: ToolDefinition[] = [
       },
       required: ["apiId"],
     },
+    outputSchema: ZENTRIXPAY_CALL_OUTPUT_SCHEMA as unknown as Record<string, unknown>,
     annotations: {
       title: "Call API (paid)",
       readOnlyHint: false,
@@ -296,6 +299,32 @@ export interface ApiToolDeps {
 /** Bounded so a large API response cannot flood the agent's context. */
 const MAX_BODY_CHARS = 20_000;
 
+/**
+ * Binary content-type prefixes and patterns that should not be decoded as text.
+ * When matched, `call()` returns size, type and a base64 payload instead of
+ * attempting to render the raw bytes as a string (#101).
+ */
+const BINARY_CONTENT_TYPE_PATTERNS = [
+  /^image\//,
+  /^audio\//,
+  /^video\//,
+  /^application\/pdf/,
+  /^application\/zip/,
+  /^application\/gzip/,
+  /^application\/octet-stream/,
+  /^application\/x-tar/,
+  /^application\/x-bzip/,
+  /^application\/wasm/,
+  /^font\//,
+];
+
+/** Returns true when `contentType` signals binary (non-text) content. */
+function isBinaryContentType(contentType: string | null): boolean {
+  if (!contentType) return false;
+  const ct = contentType.toLowerCase().split(";")[0].trim();
+  return BINARY_CONTENT_TYPE_PATTERNS.some((p) => p.test(ct));
+}
+
 function str(args: Record<string, unknown>, key: string, required = false): string | undefined {
   const value = args[key];
   if (value === undefined || value === null || value === "") {
@@ -406,6 +435,7 @@ export function createApiToolHandler(deps: ApiToolDeps) {
       );
     }
     deps.assertWithinCeiling(api.price, str(args, "maxAutoPayUsdc"));
+    assertWithinSessionSpendLimit({ price: api.price });
 
     const wallet = deps.requireWallet();
     const short = await deps.insufficientFundsMessage(wallet, api.price, `call "${api.name}"`);
@@ -429,11 +459,33 @@ export function createApiToolHandler(deps: ApiToolDeps) {
     }
 
     const res = await deps.paidFetch(wallet)(url.toString(), { method, headers, body });
-    const text = await res.text();
+    const contentType = res.headers.get("content-type");
     const charged = res.status < 400;
     const txHash = settlementTx(
       res.headers.get("payment-response") ?? res.headers.get("x-payment-response"),
     );
+
+    let bodyPayload: unknown;
+    if (isBinaryContentType(contentType)) {
+      // Binary response: return size, type and base64 instead of raw bytes (#101).
+      const buffer = await res.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      const base64 = Buffer.from(bytes).toString("base64");
+      bodyPayload = {
+        encoding: "base64",
+        sizeBytes: bytes.byteLength,
+        data:
+          base64.length > MAX_BODY_CHARS
+            ? `${base64.slice(0, MAX_BODY_CHARS)}…[truncated ${base64.length - MAX_BODY_CHARS} base64 chars]`
+            : base64,
+      };
+    } else {
+      const text = await res.text();
+      bodyPayload =
+        text.length > MAX_BODY_CHARS
+          ? `${text.slice(0, MAX_BODY_CHARS)}\n…[truncated ${text.length - MAX_BODY_CHARS} chars]`
+          : text;
+    }
 
     if (charged) {
       deps.recordPurchase({
@@ -444,6 +496,7 @@ export function createApiToolHandler(deps: ApiToolDeps) {
         receiptRef: null,
         title: api.name,
       });
+      recordSessionSpend(api.price);
     }
 
     return json({
@@ -453,11 +506,8 @@ export function createApiToolHandler(deps: ApiToolDeps) {
       charged,
       amount: charged ? `${api.price} USDC` : "0 USDC (not charged: the call failed)",
       txHash,
-      contentType: res.headers.get("content-type"),
-      body:
-        text.length > MAX_BODY_CHARS
-          ? `${text.slice(0, MAX_BODY_CHARS)}\n…[truncated ${text.length - MAX_BODY_CHARS} chars]`
-          : text,
+      contentType,
+      body: bodyPayload,
     });
   }
 
