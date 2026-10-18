@@ -71,6 +71,29 @@ const API_FIELDS = {
     minimum: 1000,
     description: "Upstream timeout per call in milliseconds (capped by the server).",
   },
+  maxResponseBytes: {
+    type: "integer",
+    minimum: 1024,
+    description:
+      "Largest upstream response, in bytes, this API may return. Must not exceed the server's PROXY_MAX_RESPONSE_BYTES; larger responses fail and are not charged.",
+  },
+  healthPath: {
+    type: "string",
+    description:
+      "Path pinged on the upstream (relative to upstreamUrl) to check health. After repeated failures the API is hidden from the catalog until it recovers.",
+    examples: ["/health"],
+  },
+  webhookUrl: {
+    type: "string",
+    description:
+      "URL that receives a signed api.call.charged event (HMAC-SHA256) after each paid call. Requires webhookSecret.",
+    examples: ["https://api.example.com/zentrixpay/webhook"],
+  },
+  webhookSecret: {
+    type: "string",
+    description:
+      "Shared secret (16+ characters) used to sign webhook events. Stored encrypted; never shown again.",
+  },
   tags: { type: "array", items: { type: "string" }, description: "Up to 10 catalog tags." },
 };
 
@@ -192,7 +215,7 @@ export const API_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "zentrixpay_update_api",
     description:
-      "Update one of your APIs: price, upstream, methods, secret header, tags, or listing (listed: false hides it from the catalog and stops calls). Pass removeUpstreamHeader: true to delete the secret header.",
+      "Update one of your APIs: price, upstream, methods, secret header, limits, health path, webhook, tags, or listing (listed: false hides it from the catalog and stops calls). Pass removeUpstreamHeader, removeWebhook or removeHealthPath: true to clear those settings.",
     inputSchema: {
       type: "object",
       properties: {
@@ -201,6 +224,11 @@ export const API_TOOL_DEFINITIONS: ToolDefinition[] = [
         removeUpstreamHeader: {
           type: "boolean",
           description: "Delete the stored secret header.",
+        },
+        removeWebhook: { type: "boolean", description: "Stop sending webhooks for this API." },
+        removeHealthPath: {
+          type: "boolean",
+          description: "Turn off health checks (the API is treated as healthy).",
         },
         listed: { type: "boolean", description: "List or unlist the API." },
         confirmMainnet: CONFIRM_MAINNET,
@@ -343,6 +371,8 @@ function apiBody(args: Record<string, unknown>): Record<string, unknown> {
     "walletAddress",
     "allowedMethods",
     "timeoutMs",
+    "maxResponseBytes",
+    "healthPath",
     "tags",
     "listed",
   ]) {
@@ -357,6 +387,16 @@ function apiBody(args: Record<string, unknown>): Record<string, unknown> {
     body.upstreamHeader = { name: headerName, value: headerValue };
   }
   if (args.removeUpstreamHeader === true) body.upstreamHeader = null;
+  const webhookUrl = str(args, "webhookUrl");
+  const webhookSecret = str(args, "webhookSecret");
+  if (webhookUrl || webhookSecret) {
+    if (!webhookUrl || !webhookSecret) {
+      throw new Error("webhookUrl and webhookSecret must be given together");
+    }
+    body.webhook = { url: webhookUrl, secret: webhookSecret };
+  }
+  if (args.removeWebhook === true) body.webhook = null;
+  if (args.removeHealthPath === true) body.healthPath = null;
   return body;
 }
 

@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import { paymentMiddleware } from "@x402/express";
 import type { RoutesConfig } from "@x402/core/server";
 import { network, sharedX402ResourceServer } from "../lib/x402.js";
-import { getApiById, type ApiRow } from "../services/apiService.js";
+import { getProxiedApi, type ApiRow } from "../services/apiService.js";
 
 // x402 paywall for the pay-per-call proxy. One payment buys one call; the
 // x402 middleware holds the response until settlement and cancels the charge
@@ -17,9 +17,16 @@ const CACHE_TTL_MS = 60_000;
 
 /** Load the API behind /api/:id and refuse requests that could never be served. */
 export async function loadProxiedApi(req: Request, res: Response, next: NextFunction) {
-  const api = await getApiById(req.params.id as string);
+  // Cached briefly; updateApi/verifyOwnership invalidate the entry (#34).
+  const api = await getProxiedApi(req.params.id as string);
   if (!api || !api.listed) {
     res.status(404).json({ error: "API not found" });
+    return;
+  }
+  // Don't ask for payment when health checks say the upstream is down (#35).
+  if (!api.healthy) {
+    res.setHeader("Retry-After", "60");
+    res.status(503).json({ error: "upstream_unhealthy" });
     return;
   }
   // Checked before the paywall so a caller is never asked to pay for a method

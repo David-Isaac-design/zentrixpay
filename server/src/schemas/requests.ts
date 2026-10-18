@@ -144,6 +144,23 @@ const upstreamHeader = z
   })
   .strict();
 
+// Signed with HMAC-SHA256; the secret is shared with the provider's receiver.
+const webhook = z
+  .object({
+    url: z.url(),
+    secret: z.string().min(16).max(256),
+  })
+  .strict();
+
+// Pinged relative to the upstream URL, like a proxied call to /api/:id<healthPath>.
+const healthPath = z
+  .string()
+  .max(512)
+  .regex(/^\/[^\s#]*$/, "healthPath must start with / and contain no spaces or fragment");
+
+// The upper bound (PROXY_MAX_RESPONSE_BYTES) is enforced by the service.
+const maxResponseBytes = z.number().int().min(1024);
+
 const tagList = z.array(z.string().trim().min(1).max(32).toLowerCase()).max(10);
 
 export const createApiSchema = z
@@ -156,6 +173,9 @@ export const createApiSchema = z
     allowedMethods: z.array(z.enum(API_METHODS)).min(1).default(["GET"]),
     upstreamHeader: upstreamHeader.optional(),
     timeoutMs: z.number().int().min(1000).optional(),
+    maxResponseBytes: maxResponseBytes.optional(),
+    webhook: webhook.optional(),
+    healthPath: healthPath.optional(),
     tags: tagList.default([]),
   })
   .strict();
@@ -170,6 +190,9 @@ export const updateApiSchema = z
     allowedMethods: z.array(z.enum(API_METHODS)).min(1).optional(),
     upstreamHeader: upstreamHeader.nullable().optional(),
     timeoutMs: z.number().int().min(1000).nullable().optional(),
+    maxResponseBytes: maxResponseBytes.nullable().optional(),
+    webhook: webhook.nullable().optional(),
+    healthPath: healthPath.nullable().optional(),
     tags: tagList.optional(),
     listed: z.boolean().optional(),
   })

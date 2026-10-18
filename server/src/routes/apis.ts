@@ -1,3 +1,4 @@
+import { createId } from "@paralleldrive/cuid2";
 import express, { Router, type Router as RouterType, type Request, type Response } from "express";
 import { apiKeyAuth } from "../middleware/apiKeyAuth.js";
 import { requestSignatureAuth } from "../middleware/requestSignatureAuth.js";
@@ -8,6 +9,7 @@ import { apiCatalogQuerySchema, createApiSchema, updateApiSchema } from "../sche
 import {
   ApiServiceError,
   createApi,
+  effectiveMaxResponseBytes,
   getApiById,
   getApiStats,
   getOwnedApi,
@@ -21,6 +23,7 @@ import {
   verifyOwnership,
   type ApiRow,
 } from "../services/apiService.js";
+import { deliverChargedCallWebhook } from "../services/webhookService.js";
 import { sendUpstream, UpstreamError } from "../lib/upstreamClient.js";
 import { filterRequestHeaders, filterResponseHeaders } from "../lib/proxyHeaders.js";
 import { parsePayerFromXPayment } from "../lib/parseXPayment.js";
@@ -94,7 +97,8 @@ router.get("/apis/:id", async (req, res) => {
   res.json(toPublicApi(api));
 });
 
-// PATCH /apis/:id — update price, upstream, methods, secret header, listing (owner)
+// PATCH /apis/:id — update price, upstream, methods, secret header, limits,
+// webhook, health path, listing (owner)
 router.patch(
   "/apis/:id",
   apiKeyAuth,
@@ -195,16 +199,27 @@ async function proxyHandler(req: Request, res: Response) {
   // Recorded once the response (and settlement) is complete: a final status
   // below 400 means the x402 middleware settled the payment.
   res.on("finish", () => {
-    recordApiCall({
-      apiId: api.id,
+    const call = {
+      callId: createId(),
       payerAddress: payerFrom(req),
-      amount: api.price,
-      charged: res.statusCode < 400,
       method: req.method,
       path:
         target.pathname.slice(new URL(api.upstreamUrl).pathname.replace(/\/+$/, "").length) || "/",
       responseStatus: res.statusCode,
       durationMs: Date.now() - started,
+    };
+    const charged = res.statusCode < 400;
+    if (charged) deliverChargedCallWebhook(api, { ...call, amount: api.price });
+    recordApiCall({
+      id: call.callId,
+      apiId: api.id,
+      payerAddress: call.payerAddress,
+      amount: api.price,
+      charged,
+      method: call.method,
+      path: call.path,
+      responseStatus: call.responseStatus,
+      durationMs: call.durationMs,
     }).catch((err) =>
       getLogger().error(
         { event: "api_call_record_failed", apiId: api.id, err },
@@ -221,7 +236,7 @@ async function proxyHandler(req: Request, res: Response) {
       headers,
       body,
       timeoutMs: api.timeoutMs ?? config.PROXY_DEFAULT_TIMEOUT_MS,
-      maxResponseBytes: config.PROXY_MAX_RESPONSE_BYTES,
+      maxResponseBytes: effectiveMaxResponseBytes(api),
       allowPrivate: config.PROXY_ALLOW_PRIVATE_UPSTREAMS,
     });
   } catch (err) {

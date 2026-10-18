@@ -7,6 +7,7 @@ import {
   registerPublisher,
   updateApi,
   verifyApiOwnership,
+  type ApiInput,
   type ApiStats,
   type HttpMethod,
   type OwnerApi,
@@ -67,6 +68,142 @@ function Field({
     </div>
   );
 }
+
+function positiveNumber(raw: string, label: string): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`${label} must be a positive number`);
+  return value;
+}
+
+/** "" → null (use the server default); otherwise a whole number of KB in bytes. */
+function kbToBytes(kb: string): number | null {
+  return kb.trim() ? Math.round(positiveNumber(kb, "Max response size") * 1024) : null;
+}
+
+function bytesToKb(bytes: number | null): string {
+  return bytes === null ? "" : String(bytes / 1024);
+}
+
+/** "" → null (use the server default); otherwise seconds in milliseconds. */
+function secondsToMs(seconds: string): number | null {
+  return seconds.trim() ? Math.round(positiveNumber(seconds, "Timeout") * 1000) : null;
+}
+
+function msToSeconds(ms: number | null): string {
+  return ms === null ? "" : String(ms / 1000);
+}
+
+/** Limits, health check and webhook — shared by registration and the settings panel. */
+interface AdvancedValues {
+  timeoutSeconds: string;
+  maxResponseKb: string;
+  healthPath: string;
+  webhookUrl: string;
+  webhookSecret: string;
+}
+
+function AdvancedFields({
+  idPrefix,
+  values,
+  onChange,
+  hasWebhookSecret = false,
+}: {
+  idPrefix: string;
+  values: AdvancedValues;
+  onChange: (values: AdvancedValues) => void;
+  hasWebhookSecret?: boolean;
+}) {
+  const set = (key: keyof AdvancedValues) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    onChange({ ...values, [key]: e.target.value });
+  return (
+    <>
+      <div className="grid gap-x-4 md:grid-cols-2">
+        <Field
+          label="Timeout (seconds)"
+          htmlFor={`${idPrefix}-timeout`}
+          hint="Blank uses the server default. Capped by the server."
+        >
+          <input
+            id={`${idPrefix}-timeout`}
+            inputMode="decimal"
+            value={values.timeoutSeconds}
+            onChange={set("timeoutSeconds")}
+            placeholder="15"
+            className={inputClass}
+          />
+        </Field>
+        <Field
+          label="Max response size (KB)"
+          htmlFor={`${idPrefix}-maxbytes`}
+          hint="Blank uses the server limit. Larger responses fail and are not charged."
+        >
+          <input
+            id={`${idPrefix}-maxbytes`}
+            inputMode="numeric"
+            value={values.maxResponseKb}
+            onChange={set("maxResponseKb")}
+            placeholder="10240"
+            className={inputClass}
+          />
+        </Field>
+      </div>
+      <Field
+        label="Health check path (optional)"
+        htmlFor={`${idPrefix}-health`}
+        hint="Pinged on your upstream every minute. After repeated failures the API is hidden from the catalog until it recovers."
+      >
+        <input
+          id={`${idPrefix}-health`}
+          value={values.healthPath}
+          onChange={set("healthPath")}
+          placeholder="/health"
+          className={`${inputClass} font-mono`}
+        />
+      </Field>
+      <div className="grid gap-x-4 md:grid-cols-2">
+        <Field
+          label="Webhook URL (optional)"
+          htmlFor={`${idPrefix}-whurl`}
+          hint="Receives a signed api.call.charged event after each paid call."
+        >
+          <input
+            id={`${idPrefix}-whurl`}
+            type="url"
+            value={values.webhookUrl}
+            onChange={set("webhookUrl")}
+            placeholder="https://api.example.com/zentrixpay/webhook"
+            className={`${inputClass} font-mono`}
+          />
+        </Field>
+        <Field
+          label="Webhook secret"
+          htmlFor={`${idPrefix}-whsecret`}
+          hint={
+            hasWebhookSecret
+              ? "A secret is stored. Enter a new one to change the URL or rotate it."
+              : "16+ characters. Events are signed with HMAC-SHA256; stored encrypted."
+          }
+        >
+          <input
+            id={`${idPrefix}-whsecret`}
+            type="password"
+            value={values.webhookSecret}
+            onChange={set("webhookSecret")}
+            className={`${inputClass} font-mono`}
+          />
+        </Field>
+      </div>
+    </>
+  );
+}
+
+const EMPTY_ADVANCED: AdvancedValues = {
+  timeoutSeconds: "",
+  maxResponseKb: "",
+  healthPath: "",
+  webhookUrl: "",
+  webhookSecret: "",
+};
 
 // ── Getting an API key ───────────────────────────────────────────────────────
 
@@ -203,6 +340,7 @@ function NewApiForm({ apiKey, onCreated }: { apiKey: string; onCreated: () => vo
   const [headerName, setHeaderName] = useState("");
   const [headerValue, setHeaderValue] = useState("");
   const [tags, setTags] = useState("");
+  const [advanced, setAdvanced] = useState<AdvancedValues>(EMPTY_ADVANCED);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -227,6 +365,13 @@ function NewApiForm({ apiKey, onCreated }: { apiKey: string; onCreated: () => vo
           .split(",")
           .map((t) => t.trim())
           .filter(Boolean),
+        timeoutMs: secondsToMs(advanced.timeoutSeconds) ?? undefined,
+        maxResponseBytes: kbToBytes(advanced.maxResponseKb) ?? undefined,
+        healthPath: advanced.healthPath.trim() || undefined,
+        webhook:
+          advanced.webhookUrl && advanced.webhookSecret
+            ? { url: advanced.webhookUrl, secret: advanced.webhookSecret }
+            : undefined,
       });
       onCreated();
     } catch (err) {
@@ -341,6 +486,12 @@ function NewApiForm({ apiKey, onCreated }: { apiKey: string; onCreated: () => vo
           className={inputClass}
         />
       </Field>
+      <details className="mb-3">
+        <summary className="mb-2 cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-200">
+          Limits, health check and webhook
+        </summary>
+        <AdvancedFields idPrefix="api" values={advanced} onChange={setAdvanced} />
+      </details>
       {error && (
         <p role="alert" className="mb-3 text-sm text-red-600 dark:text-red-400">
           {error}
@@ -409,6 +560,99 @@ function StatsPanel({ stats }: { stats: ApiStats }) {
   );
 }
 
+function SettingsPanel({
+  api,
+  apiKey,
+  onSaved,
+}: {
+  api: OwnerApi;
+  apiKey: string;
+  onSaved: (api: OwnerApi) => void;
+}) {
+  const [values, setValues] = useState<AdvancedValues>({
+    timeoutSeconds: msToSeconds(api.timeoutMs),
+    maxResponseKb: bytesToKb(api.maxResponseBytes),
+    healthPath: api.healthPath ?? "",
+    webhookUrl: api.webhookUrl ?? "",
+    webhookSecret: "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const input: ApiInput = {
+        timeoutMs: secondsToMs(values.timeoutSeconds),
+        maxResponseBytes: kbToBytes(values.maxResponseKb),
+        healthPath: values.healthPath.trim() || null,
+      };
+      if (!values.webhookUrl) {
+        if (api.webhookUrl) input.webhook = null;
+      } else if (values.webhookSecret) {
+        input.webhook = { url: values.webhookUrl, secret: values.webhookSecret };
+      } else if (values.webhookUrl !== api.webhookUrl) {
+        throw new Error("Enter the webhook secret to change the webhook URL");
+      }
+      onSaved(await updateApi(apiKey, api.id, input));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save settings");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form
+      onSubmit={save}
+      className="mt-4 rounded-lg border border-gray-200 p-4 dark:border-gray-700"
+    >
+      <AdvancedFields
+        idPrefix={`settings-${api.id}`}
+        values={values}
+        onChange={setValues}
+        hasWebhookSecret={api.hasWebhookSecret}
+      />
+      {error && (
+        <p role="alert" className="mb-3 text-sm text-red-600 dark:text-red-400">
+          {error}
+        </p>
+      )}
+      <button className={secondaryButton} disabled={busy}>
+        {busy ? "Saving…" : "Save settings"}
+      </button>
+    </form>
+  );
+}
+
+function HealthBadge({ api }: { api: OwnerApi }) {
+  if (!api.healthPath) return null;
+  const { healthy, consecutiveFailures, lastCheckedAt } = api.health;
+  const title = lastCheckedAt
+    ? `Last checked ${new Date(lastCheckedAt).toLocaleString()}`
+    : "Not checked yet";
+  if (healthy) {
+    return (
+      <span
+        title={title}
+        className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300"
+      >
+        {consecutiveFailures > 0 ? `Healthy (${consecutiveFailures} failed checks)` : "Healthy"}
+      </span>
+    );
+  }
+  return (
+    <span
+      title={title}
+      className="rounded-full bg-red-100 px-2 py-0.5 text-xs text-red-800 dark:bg-red-900/40 dark:text-red-300"
+    >
+      Upstream down — hidden from catalog
+    </span>
+  );
+}
+
 function ApiCard({
   api,
   apiKey,
@@ -424,6 +668,7 @@ function ApiCard({
   const [error, setError] = useState<string | null>(null);
   const [price, setPrice] = useState(api.price);
   const [stats, setStats] = useState<ApiStats | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
 
   async function run(label: string, action: () => Promise<OwnerApi | void>) {
     setBusy(label);
@@ -452,6 +697,7 @@ function ApiCard({
             Ownership not verified
           </span>
         )}
+        <HealthBadge api={api} />
       </div>
 
       <dl className="mb-3 grid gap-1 text-sm">
@@ -484,6 +730,29 @@ function ApiCard({
             <dt className="text-gray-500 dark:text-gray-400">Secret header</dt>
             <dd className="font-mono text-gray-800 dark:text-gray-100">
               {api.upstreamHeaderName}: ••••••
+            </dd>
+          </div>
+        )}
+        <div className="flex flex-wrap gap-2">
+          <dt className="text-gray-500 dark:text-gray-400">Limits</dt>
+          <dd className="text-gray-800 dark:text-gray-100">
+            {api.timeoutMs === null ? "default timeout" : `${api.timeoutMs / 1000}s timeout`},{" "}
+            {api.maxResponseBytes === null
+              ? "server response limit"
+              : `${Math.round(api.maxResponseBytes / 1024)} KB max response`}
+          </dd>
+        </div>
+        {api.healthPath && (
+          <div className="flex flex-wrap gap-2">
+            <dt className="text-gray-500 dark:text-gray-400">Health check</dt>
+            <dd className="font-mono text-gray-800 dark:text-gray-100">GET {api.healthPath}</dd>
+          </div>
+        )}
+        {api.webhookUrl && (
+          <div className="flex flex-wrap gap-2">
+            <dt className="text-gray-500 dark:text-gray-400">Webhook</dt>
+            <dd className="font-mono text-gray-800 dark:text-gray-100 break-all">
+              {api.webhookUrl}
             </dd>
           </div>
         )}
@@ -551,12 +820,29 @@ function ApiCard({
         >
           {stats ? "Hide stats" : busy === "Stats" ? "Loading…" : "Stats"}
         </button>
+        <button
+          className={secondaryButton}
+          disabled={busy !== null}
+          onClick={() => setShowSettings((v) => !v)}
+        >
+          {showSettings ? "Hide settings" : "Settings"}
+        </button>
       </div>
 
       {error && (
         <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">
           {error}
         </p>
+      )}
+      {showSettings && (
+        <SettingsPanel
+          api={api}
+          apiKey={apiKey}
+          onSaved={(updated) => {
+            onChanged(updated);
+            setShowSettings(false);
+          }}
+        />
       )}
       {stats && <StatsPanel stats={stats} />}
     </li>

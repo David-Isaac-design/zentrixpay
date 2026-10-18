@@ -126,6 +126,21 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((v) => v === "true"),
+  // How long a proxied API's row is cached between DB lookups (#34). Edits
+  // invalidate the entry, so this only bounds staleness across replicas.
+  PROXY_API_CACHE_TTL_MS: z.coerce.number().int().min(0).default(5_000),
+
+  // Upstream health checks (#35): APIs with a healthPath are pinged on this
+  // interval and hidden from the catalog after this many consecutive failures.
+  HEALTH_CHECK_INTERVAL_MS: z.coerce.number().int().min(0).default(60_000),
+  HEALTH_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
+  HEALTH_CHECK_FAILURE_THRESHOLD: z.coerce.number().int().min(1).default(3),
+
+  // Provider webhooks for charged calls (#36). Delays between attempts grow
+  // as WEBHOOK_RETRY_BASE_MS * 4^n.
+  WEBHOOK_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
+  WEBHOOK_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(5),
+  WEBHOOK_RETRY_BASE_MS: z.coerce.number().int().positive().default(1_000),
 });
 
 const parsed = envSchema.safeParse(envWithDefaults);

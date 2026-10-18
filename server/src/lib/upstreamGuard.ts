@@ -58,33 +58,38 @@ export function isPublicAddress(address: string): boolean {
 export class UpstreamUrlError extends Error {}
 
 /**
- * Static checks on a provider-supplied upstream URL. Address checks on the
- * resolved host happen at connect time (see upstreamClient.ts), so a hostname
- * that later re-resolves to a private address is still refused.
+ * Static checks on a provider-supplied upstream (or webhook) URL. Address
+ * checks on the resolved host happen at connect time (see upstreamClient.ts),
+ * so a hostname that later re-resolves to a private address is still refused.
  */
-export function validateUpstreamUrl(raw: string, opts: { allowPrivate: boolean }): URL {
+export function validateUpstreamUrl(
+  raw: string,
+  opts: { allowPrivate: boolean; field?: string },
+): URL {
+  const field = opts.field ?? "upstreamUrl";
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new UpstreamUrlError("upstreamUrl is not a valid URL");
+    throw new UpstreamUrlError(`${field} is not a valid URL`);
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new UpstreamUrlError("upstreamUrl must use http or https");
+    throw new UpstreamUrlError(`${field} must use http or https`);
   }
   if (url.username || url.password) {
-    throw new UpstreamUrlError("upstreamUrl must not contain credentials; use upstreamHeader");
+    const hint = field === "upstreamUrl" ? "; use upstreamHeader" : "";
+    throw new UpstreamUrlError(`${field} must not contain credentials${hint}`);
   }
   if (url.hash) {
-    throw new UpstreamUrlError("upstreamUrl must not contain a fragment");
+    throw new UpstreamUrlError(`${field} must not contain a fragment`);
   }
   if (!opts.allowPrivate) {
     const host = url.hostname.replace(/^\[|\]$/g, "");
     if (isIP(host) && !isPublicAddress(host)) {
-      throw new UpstreamUrlError("upstreamUrl must point at a public address");
+      throw new UpstreamUrlError(`${field} must point at a public address`);
     }
     if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".internal")) {
-      throw new UpstreamUrlError("upstreamUrl must point at a public address");
+      throw new UpstreamUrlError(`${field} must point at a public address`);
     }
   }
   return url;
