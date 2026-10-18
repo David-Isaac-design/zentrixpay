@@ -146,6 +146,13 @@ const upstreamHeader = z
 
 const tagList = z.array(z.string().trim().min(1).max(32).toLowerCase()).max(10);
 
+export const PAYER_LIST_MAX = 500;
+
+const payerList = z
+  .array(z.string().regex(/^G[A-Z2-7]{55}$/, "payer lists must hold Stellar public keys (G...)"))
+  .max(PAYER_LIST_MAX)
+  .transform((list) => [...new Set(list)]);
+
 export const createApiSchema = z
   .object({
     name: z.string().trim().min(1).max(120),
@@ -157,6 +164,9 @@ export const createApiSchema = z
     upstreamHeader: upstreamHeader.optional(),
     timeoutMs: z.number().int().min(1000).optional(),
     tags: tagList.default([]),
+    // Only these wallets may call the API; omit to allow everyone.
+    payerAllowlist: payerList.optional(),
+    payerDenylist: payerList.default([]),
   })
   .strict();
 
@@ -171,9 +181,53 @@ export const updateApiSchema = z
     upstreamHeader: upstreamHeader.nullable().optional(),
     timeoutMs: z.number().int().min(1000).nullable().optional(),
     tags: tagList.optional(),
+    // null removes the allowlist, opening the API to every wallet again.
+    payerAllowlist: payerList.nullable().optional(),
+    payerDenylist: payerList.optional(),
     listed: z.boolean().optional(),
   })
   .strict();
+
+const MAX_STATS_BUCKETS = 1000;
+
+export const apiStatsQuerySchema = z
+  .object({
+    interval: z.enum(["hour", "day"]).optional(),
+    from: z.iso.datetime({ offset: true }).optional(),
+    to: z.iso.datetime({ offset: true }).optional(),
+  })
+  .transform((q, ctx) => {
+    if (!q.interval) {
+      if (q.from || q.to) {
+        ctx.addIssue({ code: "custom", message: "from/to require interval", path: ["interval"] });
+        return z.NEVER;
+      }
+      return { interval: undefined };
+    }
+    const bucketMs = q.interval === "hour" ? 3_600_000 : 86_400_000;
+    const to = q.to ? new Date(q.to) : new Date();
+    // Defaults: the last 24 hours by hour, or the last 30 days by day.
+    const defaultBuckets = q.interval === "hour" ? 24 : 30;
+    const from = q.from ? new Date(q.from) : new Date(to.getTime() - bucketMs * defaultBuckets);
+    if (from >= to) {
+      ctx.addIssue({ code: "custom", message: "from must be before to", path: ["from"] });
+      return z.NEVER;
+    }
+    if ((to.getTime() - from.getTime()) / bucketMs > MAX_STATS_BUCKETS) {
+      ctx.addIssue({
+        code: "custom",
+        message: `range spans more than ${MAX_STATS_BUCKETS} ${q.interval} buckets`,
+        path: ["from"],
+      });
+      return z.NEVER;
+    }
+    return { interval: q.interval, from, to };
+  });
+
+export const payerCallsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).default(0),
+});
 
 export const apiCatalogQuerySchema = z.object({
   q: z.string().trim().max(100).optional(),

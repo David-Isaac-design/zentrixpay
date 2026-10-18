@@ -3,6 +3,7 @@ import { paymentMiddleware } from "@x402/express";
 import type { RoutesConfig } from "@x402/core/server";
 import { network, sharedX402ResourceServer } from "../lib/x402.js";
 import { getApiById, type ApiRow } from "../services/apiService.js";
+import { paymentHeader, payerFromPayment } from "../lib/payer.js";
 
 // x402 paywall for the pay-per-call proxy. One payment buys one call; the
 // x402 middleware holds the response until settlement and cancels the charge
@@ -30,6 +31,32 @@ export async function loadProxiedApi(req: Request, res: Response, next: NextFunc
     return;
   }
   res.locals.api = api;
+  next();
+}
+
+/** Whether the API's allow/deny lists admit this payer wallet. */
+export function isPayerAllowed(api: ApiRow, payer: string): boolean {
+  if (api.payerDenylist.includes(payer)) return false;
+  return !api.payerAllowlist || api.payerAllowlist.includes(payer);
+}
+
+/**
+ * Enforce the API's payer allow/deny lists before the paywall, so a refused
+ * wallet gets 403 and its payment is never verified or settled. A request
+ * without a payment still gets the 402 challenge: the wallet is only known
+ * once the caller attaches a payment, and that request is checked here.
+ */
+export function checkPayerAccess(req: Request, res: Response, next: NextFunction) {
+  const api = res.locals.api as ApiRow;
+  const header = paymentHeader(req);
+  const restricted = api.payerAllowlist !== null || api.payerDenylist.length > 0;
+  if (!restricted || !header) return next();
+
+  const payer = payerFromPayment(header).address;
+  if (!payer || !isPayerAllowed(api, payer)) {
+    res.status(403).json({ error: "This wallet is not allowed to call this API" });
+    return;
+  }
   next();
 }
 

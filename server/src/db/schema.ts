@@ -148,6 +148,10 @@ export const apis = pgTable(
     ownershipVerifiedAt: timestamp("ownership_verified_at"),
     listed: boolean("listed").notNull().default(false),
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    // Payer wallet access control, checked before payment. A null allowlist
+    // admits every wallet; the denylist always wins.
+    payerAllowlist: jsonb("payer_allowlist").$type<string[]>(),
+    payerDenylist: jsonb("payer_denylist").$type<string[]>().notNull().default([]),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => ({
@@ -173,10 +177,15 @@ export const apiCalls = pgTable(
     path: text("path").notNull(),
     responseStatus: integer("response_status").notNull(),
     durationMs: integer("duration_ms").notNull(),
+    // Settlement transaction, from the x402 PAYMENT-RESPONSE header; null when not charged.
+    txHash: text("tx_hash"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => ({
     apiCreatedIdx: index("idx_api_calls_api_id_created_at").on(table.apiId, table.createdAt),
-    payerIdx: index("idx_api_calls_payer_address").on(table.payerAddress),
+    payerCreatedIdx: index("idx_api_calls_payer_address_created_at").on(
+      table.payerAddress,
+      table.createdAt,
+    ),
   }),
 );

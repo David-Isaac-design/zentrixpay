@@ -44,6 +44,8 @@ export function toOwnerApi(api: ApiRow) {
     upstreamHeaderName: api.upstreamHeaderName,
     hasUpstreamSecret: Boolean(api.upstreamHeaderValueEnc),
     timeoutMs: api.timeoutMs,
+    payerAllowlist: api.payerAllowlist,
+    payerDenylist: api.payerDenylist,
     listed: api.listed,
     ownershipVerified: Boolean(api.ownershipVerifiedAt),
     ownershipVerification: {
@@ -102,6 +104,8 @@ export interface CreateApiInput {
   upstreamHeader?: { name: string; value: string };
   timeoutMs?: number;
   tags: string[];
+  payerAllowlist?: string[];
+  payerDenylist?: string[];
 }
 
 export async function createApi(input: CreateApiInput): Promise<ApiRow> {
@@ -117,6 +121,8 @@ export async function createApi(input: CreateApiInput): Promise<ApiRow> {
       allowedMethods: input.allowedMethods,
       timeoutMs: clampTimeout(input.timeoutMs),
       tags: input.tags,
+      payerAllowlist: input.payerAllowlist ?? null,
+      payerDenylist: input.payerDenylist ?? [],
       ownershipToken: randomBytes(16).toString("hex"),
       ...encryptedHeader(input.upstreamHeader),
     })
@@ -171,6 +177,8 @@ export interface UpdateApiInput {
   upstreamHeader?: { name: string; value: string } | null;
   timeoutMs?: number | null;
   tags?: string[];
+  payerAllowlist?: string[] | null;
+  payerDenylist?: string[];
   listed?: boolean;
 }
 
@@ -183,6 +191,8 @@ export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<Api
     allowedMethods: input.allowedMethods,
     timeoutMs: clampTimeout(input.timeoutMs),
     tags: input.tags,
+    payerAllowlist: input.payerAllowlist,
+    payerDenylist: input.payerDenylist,
     ...encryptedHeader(input.upstreamHeader),
   };
 
@@ -266,6 +276,7 @@ export interface RecordCallInput {
   path: string;
   responseStatus: number;
   durationMs: number;
+  txHash?: string | null;
 }
 
 export async function recordApiCall(input: RecordCallInput): Promise<void> {
@@ -293,4 +304,93 @@ export async function listRecentCalls(apiId: string, limit: number) {
     .where(eq(apiCalls.apiId, apiId))
     .orderBy(desc(apiCalls.createdAt))
     .limit(limit);
+}
+
+export type StatsInterval = "hour" | "day";
+
+export interface StatsBucket {
+  bucket: string;
+  calls: number;
+  chargedCalls: number;
+  revenue: string;
+}
+
+/**
+ * Calls, charged calls and revenue per hour or day over [from, to). Every
+ * bucket in the range is returned, empty ones included. Bucket boundaries are
+ * UTC: created_at is a UTC `timestamp`, and the bounds are cast the same way.
+ */
+export async function getApiTimeSeries(
+  apiId: string,
+  opts: { interval: StatsInterval; from: Date; to: Date },
+): Promise<StatsBucket[]> {
+  // Only ever "hour" or "day" (validated), so safe to inline.
+  const unit = sql.raw(`'${opts.interval === "hour" ? "hour" : "day"}'`);
+  const step = sql.raw(`interval '1 ${opts.interval === "hour" ? "hour" : "day"}'`);
+  const from = sql`${opts.from.toISOString()}::timestamptz at time zone 'UTC'`;
+  const to = sql`${opts.to.toISOString()}::timestamptz at time zone 'UTC'`;
+
+  const rows = await db.execute<{
+    bucket: string;
+    calls: number;
+    charged_calls: number;
+    revenue: string;
+  }>(sql`
+    with buckets as (
+      select generate_series(
+        date_trunc(${unit}, ${from}),
+        date_trunc(${unit}, ${to} - interval '1 microsecond'),
+        ${step}
+      ) as bucket
+    )
+    select
+      to_char(b.bucket, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as bucket,
+      count(c.id)::int as calls,
+      count(c.id) filter (where c.charged)::int as charged_calls,
+      coalesce(sum(c.amount::numeric) filter (where c.charged), 0)::text as revenue
+    from buckets b
+    left join ${apiCalls} c
+      on c.api_id = ${apiId}
+      and date_trunc(${unit}, c.created_at) = b.bucket
+      and c.created_at >= ${from}
+      and c.created_at < ${to}
+    group by b.bucket
+    order by b.bucket
+  `);
+  return rows.map((r) => ({
+    bucket: r.bucket,
+    calls: r.calls,
+    chargedCalls: r.charged_calls,
+    revenue: r.revenue,
+  }));
+}
+
+/** A payer's charged calls, newest first, as receipts. */
+export async function listPayerCalls(
+  payerAddress: string,
+  opts: { limit: number; offset: number },
+) {
+  // One extra row tells us whether another page exists.
+  const rows = await db
+    .select({
+      id: apiCalls.id,
+      apiId: apiCalls.apiId,
+      apiName: apis.name,
+      amount: apiCalls.amount,
+      txHash: apiCalls.txHash,
+      method: apiCalls.method,
+      responseStatus: apiCalls.responseStatus,
+      createdAt: apiCalls.createdAt,
+    })
+    .from(apiCalls)
+    .innerJoin(apis, eq(apis.id, apiCalls.apiId))
+    .where(and(eq(apiCalls.payerAddress, payerAddress), eq(apiCalls.charged, true)))
+    .orderBy(desc(apiCalls.createdAt), desc(apiCalls.id))
+    .limit(opts.limit + 1)
+    .offset(opts.offset);
+  const hasMore = rows.length > opts.limit;
+  return {
+    calls: rows.slice(0, opts.limit).map((r) => ({ ...r, currency: "USDC" })),
+    hasMore,
+  };
 }
