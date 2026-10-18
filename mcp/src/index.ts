@@ -3871,7 +3871,8 @@ async function dispatchToolOutcome(
       : {};
 
   const isDryRunCall =
-    (name === "zentrixpay_publish" || name === "zentrixpay_buy") && rawRecord.dryRun === true;
+    (name === "zentrixpay_publish" || name === "zentrixpay_buy" || name === "zentrixpay_call") &&
+    rawRecord.dryRun === true;
 
   const args: ValidatedArgs =
     name in TOOL_ARGUMENT_SPECS && !isDryRunCall ? validateToolArgs(name, rawArgs) : {};

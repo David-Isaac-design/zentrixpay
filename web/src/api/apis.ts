@@ -99,24 +99,21 @@ async function readJson<T>(res: Response): Promise<T> {
   return body as T;
 }
 
-export const API_SORTS = ["newest", "price_asc", "price_desc", "popular"] as const;
-export type ApiSort = (typeof API_SORTS)[number];
-
-export interface ApiCatalogQuery {
-  q?: string;
-  tags?: string[];
-  sort?: ApiSort;
-}
-
 export async function fetchApis(
-  { q = "", tags = [], sort = "newest" }: ApiCatalogQuery,
+  q: string,
   signal?: AbortSignal,
+  limit = 20,
+  offset = 0,
 ): Promise<PublicApi[]> {
   const url = new URL(`${API_BASE}/apis`, window.location.origin);
   if (q.trim()) url.searchParams.set("q", q.trim());
-  for (const tag of tags) url.searchParams.append("tag", tag);
-  if (sort !== "newest") url.searchParams.set("sort", sort);
-  url.searchParams.set("limit", "100");
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("offset", String(offset));
+  return readJson(await fetch(url, { signal }));
+}
+
+export async function fetchApiById(id: string, signal?: AbortSignal): Promise<PublicApi> {
+  const url = new URL(`${API_BASE}/apis/${encodeURIComponent(id)}`, window.location.origin);
   return readJson(await fetch(url, { signal }));
 }
 
@@ -175,4 +172,26 @@ export async function archiveApi(apiKey: string, id: string): Promise<void> {
 
 export async function fetchApiStats(apiKey: string, id: string): Promise<ApiStats> {
   return readJson(await signedPublisherFetch(absolute(`/apis/${id}/stats`), apiKey));
+}
+
+export interface TimeSeriesPoint {
+  date: string; // yyyy-mm-dd
+  calls: number;
+  revenue: string;
+}
+
+export interface ApiTimeSeries {
+  apiId: string;
+  days: 7 | 30 | 90;
+  series: TimeSeriesPoint[];
+}
+
+export async function fetchApiTimeSeries(
+  apiKey: string,
+  id: string,
+  days: 7 | 30 | 90,
+): Promise<ApiTimeSeries> {
+  return readJson(
+    await signedPublisherFetch(absolute(`/apis/${id}/stats/time-series?days=${days}`), apiKey),
+  );
 }
