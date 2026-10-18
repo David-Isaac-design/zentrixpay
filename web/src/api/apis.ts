@@ -99,10 +99,16 @@ async function readJson<T>(res: Response): Promise<T> {
   return body as T;
 }
 
-export async function fetchApis(q: string, signal?: AbortSignal): Promise<PublicApi[]> {
+export async function fetchApis(
+  q: string,
+  signal?: AbortSignal,
+  limit = 20,
+  offset = 0,
+): Promise<PublicApi[]> {
   const url = new URL(`${API_BASE}/apis`, window.location.origin);
   if (q.trim()) url.searchParams.set("q", q.trim());
-  url.searchParams.set("limit", "100");
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("offset", String(offset));
   return readJson(await fetch(url, { signal }));
 }
 
@@ -161,4 +167,26 @@ export async function verifyApiOwnership(apiKey: string, id: string): Promise<Ow
 
 export async function fetchApiStats(apiKey: string, id: string): Promise<ApiStats> {
   return readJson(await signedPublisherFetch(absolute(`/apis/${id}/stats`), apiKey));
+}
+
+export interface TimeSeriesPoint {
+  date: string; // yyyy-mm-dd
+  calls: number;
+  revenue: string;
+}
+
+export interface ApiTimeSeries {
+  apiId: string;
+  days: 7 | 30 | 90;
+  series: TimeSeriesPoint[];
+}
+
+export async function fetchApiTimeSeries(
+  apiKey: string,
+  id: string,
+  days: 7 | 30 | 90,
+): Promise<ApiTimeSeries> {
+  return readJson(
+    await signedPublisherFetch(absolute(`/apis/${id}/stats/time-series?days=${days}`), apiKey),
+  );
 }

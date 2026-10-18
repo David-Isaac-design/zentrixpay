@@ -294,3 +294,49 @@ export async function listRecentCalls(apiId: string, limit: number) {
     .orderBy(desc(apiCalls.createdAt))
     .limit(limit);
 }
+
+/** One data point in a time-series response: calls and revenue for a single calendar day. */
+export interface TimeSeriesPoint {
+  date: string; // ISO date yyyy-mm-dd in UTC
+  calls: number;
+  revenue: string; // USDC, as decimal string
+}
+
+/**
+ * Returns one row per UTC calendar day, covering the last `days` days (today
+ * inclusive). Days with no calls are filled in with zeros so the caller always
+ * gets a contiguous series.
+ */
+export async function getApiTimeSeries(
+  apiId: string,
+  days: 7 | 30 | 90,
+): Promise<TimeSeriesPoint[]> {
+  const rows = await db
+    .select({
+      date: sql<string>`to_char(date_trunc('day', ${apiCalls.createdAt} at time zone 'UTC'), 'YYYY-MM-DD')`,
+      calls: sql<number>`count(*)::int`,
+      revenue: sql<string>`coalesce(sum(${apiCalls.amount}::numeric) filter (where ${apiCalls.charged}), 0)::text`,
+    })
+    .from(apiCalls)
+    .where(
+      and(
+        eq(apiCalls.apiId, apiId),
+        sql`${apiCalls.createdAt} >= now() - interval '${sql.raw(String(days))} days'`,
+      ),
+    )
+    .groupBy(sql`1`)
+    .orderBy(sql`1`);
+
+  // Build a map so we can fill in missing dates with zeros.
+  const byDate = new Map(rows.map((r) => [r.date, r]));
+
+  const result: TimeSeriesPoint[] = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
+    const dateStr = d.toISOString().slice(0, 10);
+    const row = byDate.get(dateStr);
+    result.push({ date: dateStr, calls: row?.calls ?? 0, revenue: row?.revenue ?? "0" });
+  }
+  return result;
+}
