@@ -1,85 +1,53 @@
-# x402 Gateway
+# Project
 
-A payment-gated API gateway that lets you charge for any HTTP endpoint using the [x402 protocol](https://x402.org). Callers pay per request with USDC on Base; the gateway verifies the payment on-chain and proxies the request to your upstream service.
+## Getting started
 
-## Features
+### Prerequisites
 
-- **Pay-per-call HTTP endpoints** — wrap any upstream API behind a `402 Payment Required` handshake
-- **MCP server** — expose paid tools to agents (Claude Code, Codex, and any MCP client)
-- **On-chain verification** — payments are verified against Base mainnet/testnet before the request is proxied
-- **Per-route pricing** — configure price, network, and payee per endpoint
-- **Call history** — every paid call is recorded and queryable
+- **Node.js** (v18 or newer recommended)
 
-## Quick start
+This project uses [pnpm](https://pnpm.io/) as its package manager. You do **not** need to install pnpm globally — the recommended way is to enable it through Node's built-in [Corepack](https://nodejs.org/api/corepack.html):
 
-```bash
-npm install
-cp .env.example .env
-# edit .env with your RPC URL, payee address, and upstream URLs
-npm run dev
+```sh
+corepack enable
 ```
 
-The gateway listens on `http://localhost:3000` by default.
+Once Corepack is enabled, `pnpm` will be available on your `PATH` and will automatically use the version pinned in the project's `package.json` (`packageManager` field).
 
-## Configuration
+### Installing dependencies
 
-Routes are defined in `config/routes.json`:
-
-```json
-{
-  "routes": [
-    {
-      "path": "/api/weather",
-      "upstream": "https://api.example.com/weather",
-      "price": "0.001",
-      "network": "base-sepolia",
-      "payee": "0xYourAddress"
-    }
-  ]
-}
+```sh
+pnpm install
 ```
 
-| Field      | Description                                              |
-| ---------- | -------------------------------------------------------- |
-| `path`     | Public path exposed by the gateway                       |
-| `upstream` | Upstream URL the request is proxied to after payment     |
-| `price`    | Price in USDC per call                                   |
-| `network`  | `base` or `base-sepolia`                                 |
-| `payee`    | Address that receives the payment                        |
+## Git hooks
 
-## For callers
+This repository uses [Husky](https://typicode.github.io/husky/) to run Git hooks (for example, `pre-commit` and `commit-msg`). These hooks invoke `pnpm exec` to run tooling such as linters and commit-message checks.
 
-Every paid route responds with `402 Payment Required` until a valid payment is attached. The response includes a `PAYMENT-REQUIRED` header describing what to pay; retry the same request with a `PAYMENT-SIGNATURE` header and the gateway returns the upstream response plus a `PAYMENT-RESPONSE` header.
+If `pnpm` is not available on your `PATH`, the hooks will fall back to running pnpm via `npx pnpm@<version>` (using the version pinned in `package.json`). This means commits will still work on a machine that only has Node.js installed, as long as `npx` can download the pinned pnpm version.
 
-```bash
-# 1. First call — expect a 402 with payment instructions
-curl -i http://localhost:3000/api/weather
+If neither `pnpm` nor `npx` is available, the hooks will fail with a clear message explaining how to fix the setup. To resolve it, either:
 
-# 2. Retry with the signed payment
-curl -i http://localhost:3000/api/weather \
-  -H "PAYMENT-SIGNATURE: <base64-encoded-payment-payload>"
-```
+1. Enable Corepack (recommended):
 
-For a full walkthrough with real (redacted) testnet headers — decoding `PAYMENT-REQUIRED`, constructing the `PAYMENT-SIGNATURE`, and reading the `PAYMENT-RESPONSE` receipt — see **[docs/curl-402-walkthrough.md](docs/curl-402-walkthrough.md)**.
+   ```sh
+   corepack enable
+   ```
 
-## MCP server
+2. Or install pnpm globally:
 
-The gateway ships an MCP server that exposes paid routes as tools, so agents can discover and call them directly. Start it with:
+   ```sh
+   npm install -g pnpm
+   ```
 
-```bash
-npm run mcp
-```
+After enabling Corepack or installing pnpm, re-run `pnpm install` so the hooks are set up correctly.
 
-Tools include `list_paid_tools`, `call_paid_tool`, and `get_call_history`. Wallet setup, example prompts, and sample tool outputs for Claude Code and Codex are documented in **[docs/mcp-pay-per-call.md](docs/mcp-pay-per-call.md)**.
+## Contributing
 
-## Development
+1. Fork and clone the repository.
+2. Enable Corepack (`corepack enable`) or install pnpm globally.
+3. Run `pnpm install`.
+4. Create a branch, make your changes, and commit. The Git hooks will run automatically.
+5. Open a pull request.
 
-```bash
-npm run dev     # start the gateway with hot reload
-npm test        # run the test suite
-npm run lint    # lint the codebase
-```
-
-## License
-
-MIT
+If you run into issues with the Git hooks, make sure `pnpm` (or `npx`) is available on your `PATH` and that you have run `pnpm install` after cloning.
