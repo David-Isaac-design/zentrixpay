@@ -156,15 +156,14 @@ export const apis = pgTable(
     ownershipVerifiedAt: timestamp("ownership_verified_at"),
     listed: boolean("listed").notNull().default(false),
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
-    // Registration in the vault registry, which anchors price and payee so
-    // callers can check them on-chain. Listing requires "registered".
-    onchainStatus: onchainStatusEnum("onchain_status").notNull().default("none"),
-    onchainTxHash: text("onchain_tx_hash"),
+    // Soft delete: archived APIs are hidden everywhere but keep their call history.
+    archivedAt: timestamp("archived_at"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => ({
     publisherIdx: index("idx_apis_publisher_id").on(table.publisherId),
     catalogIdx: index("idx_apis_listed_created_at").on(table.listed, table.createdAt),
+    tagsIdx: index("idx_apis_tags").using("gin", table.tags),
   }),
 );
 
@@ -185,17 +184,16 @@ export const apiCalls = pgTable(
     path: text("path").notNull(),
     responseStatus: integer("response_status").notNull(),
     durationMs: integer("duration_ms").notNull(),
-    // Provider-initiated refund: "pending" while the USDC transfer back to the
-    // payer is being submitted, "refunded" once it confirmed.
-    refundStatus: text("refund_status").$type<"pending" | "refunded">(),
-    refundAmount: text("refund_amount"),
-    refundTxHash: text("refund_tx_hash"),
-    refundedAt: timestamp("refunded_at"),
+    // Settlement transaction, from the x402 PAYMENT-RESPONSE header; null when not charged.
+    txHash: text("tx_hash"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => ({
     refundTxIdx: uniqueIndex("idx_api_calls_refund_tx_hash").on(table.refundTxHash),
     apiCreatedIdx: index("idx_api_calls_api_id_created_at").on(table.apiId, table.createdAt),
-    payerIdx: index("idx_api_calls_payer_address").on(table.payerAddress),
+    payerCreatedIdx: index("idx_api_calls_payer_address_created_at").on(
+      table.payerAddress,
+      table.createdAt,
+    ),
   }),
 );

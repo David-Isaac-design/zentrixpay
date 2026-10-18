@@ -1,12 +1,12 @@
 import { randomBytes } from "node:crypto";
-import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { apiCalls, apis } from "../db/schema.js";
 import { config } from "../config.js";
 import { encryptSecret } from "../utils/secretBox.js";
 import { validateUpstreamUrl } from "../lib/upstreamGuard.js";
 import { sendUpstream } from "../lib/upstreamClient.js";
-import { OpenApiSpecError, parseOpenApiSpec, publicOpenApiSpec } from "./openApiSpec.js";
+import type { apiCatalogSortValues } from "../schemas/requests.js";
 
 export type ApiRow = typeof apis.$inferSelect;
 
@@ -64,6 +64,8 @@ export function toOwnerApi(api: ApiRow) {
     upstreamQueryParamName: api.upstreamQueryName,
     hasUpstreamQuerySecret: Boolean(api.upstreamQueryValueEnc),
     timeoutMs: api.timeoutMs,
+    payerAllowlist: api.payerAllowlist,
+    payerDenylist: api.payerDenylist,
     listed: api.listed,
     onchainStatus: api.onchainStatus,
     ownershipVerified: Boolean(api.ownershipVerifiedAt),
@@ -149,6 +151,8 @@ export interface CreateApiInput {
   openapiSpec?: string | Record<string, unknown>;
   timeoutMs?: number;
   tags: string[];
+  payerAllowlist?: string[];
+  payerDenylist?: string[];
 }
 
 export async function createApi(input: CreateApiInput): Promise<ApiRow> {
@@ -164,6 +168,8 @@ export async function createApi(input: CreateApiInput): Promise<ApiRow> {
       allowedMethods: input.allowedMethods,
       timeoutMs: clampTimeout(input.timeoutMs),
       tags: input.tags,
+      payerAllowlist: input.payerAllowlist ?? null,
+      payerDenylist: input.payerDenylist ?? [],
       ownershipToken: randomBytes(16).toString("hex"),
       openapiSpec: checkedOpenApiSpec(input.openapiSpec),
       ...encryptedHeader(input.upstreamHeader),
@@ -173,29 +179,73 @@ export async function createApi(input: CreateApiInput): Promise<ApiRow> {
   return row;
 }
 
-export async function getApiById(id: string): Promise<ApiRow | null> {
+/** Load an API by id. Archived APIs are treated as missing unless `includeArchived` is set. */
+export async function getApiById(
+  id: string,
+  opts: { includeArchived?: boolean } = {},
+): Promise<ApiRow | null> {
   const rows = await db.select().from(apis).where(eq(apis.id, id));
-  return rows[0] ?? null;
+  const api = rows[0] ?? null;
+  if (api?.archivedAt && !opts.includeArchived) return null;
+  return api;
 }
 
 /** Load an API and require that `publisherId` owns it (404 otherwise, to avoid leaking ids). */
-export async function getOwnedApi(id: string, publisherId: string): Promise<ApiRow> {
-  const api = await getApiById(id);
+export async function getOwnedApi(
+  id: string,
+  publisherId: string,
+  opts: { includeArchived?: boolean } = {},
+): Promise<ApiRow> {
+  const api = await getApiById(id, opts);
   if (!api || api.publisherId !== publisherId) throw new ApiServiceError(404, "API not found");
   return api;
 }
 
-export async function listPublicApis(opts: { q?: string; limit: number; offset: number }) {
-  const conditions = [eq(apis.listed, true)];
+export type ApiCatalogSort = (typeof apiCatalogSortValues)[number];
+
+export interface ApiCatalogOptions {
+  q?: string;
+  tag?: string[];
+  sort?: ApiCatalogSort;
+  limit: number;
+  offset: number;
+}
+
+/** Window used to rank APIs by popularity (charged calls). */
+export const POPULARITY_WINDOW_DAYS = 7;
+
+export async function listPublicApis(opts: ApiCatalogOptions) {
+  const conditions = [eq(apis.listed, true), isNull(apis.archivedAt)];
   if (opts.q) {
     const pattern = `%${opts.q.replace(/[%_\\]/g, "\\$&")}%`;
     conditions.push(or(ilike(apis.name, pattern), ilike(apis.description, pattern))!);
   }
+  if (opts.tag?.length) {
+    // jsonb containment: the API's tags must include every requested tag.
+    conditions.push(sql`${apis.tags} @> ${JSON.stringify(opts.tag)}::jsonb`);
+  }
+
+  // Charged calls in the popularity window; correlated so it only runs for this sort.
+  const recentChargedCalls = sql`(
+    select count(*) from ${apiCalls}
+    where ${apiCalls.apiId} = ${apis.id}
+      and ${apiCalls.charged}
+      and ${apiCalls.createdAt} >= now() - make_interval(days => ${POPULARITY_WINDOW_DAYS})
+  )`;
+  const price = sql`${apis.price}::numeric`;
+  const order = {
+    newest: [desc(apis.createdAt)],
+    price_asc: [asc(price), desc(apis.createdAt)],
+    price_desc: [desc(price), desc(apis.createdAt)],
+    popular: [desc(recentChargedCalls), desc(apis.createdAt)],
+  }[opts.sort ?? "newest"];
+
   const rows = await db
     .select()
     .from(apis)
     .where(and(...conditions))
-    .orderBy(desc(apis.createdAt))
+    // id breaks ties so offset pagination is stable.
+    .orderBy(...order, asc(apis.id))
     .limit(opts.limit)
     .offset(opts.offset);
   return rows.map(toPublicApi);
@@ -205,9 +255,19 @@ export async function listPublisherApis(publisherId: string) {
   const rows = await db
     .select()
     .from(apis)
-    .where(eq(apis.publisherId, publisherId))
+    .where(and(eq(apis.publisherId, publisherId), isNull(apis.archivedAt)))
     .orderBy(desc(apis.createdAt));
   return rows.map(toOwnerApi);
+}
+
+/** Soft-delete: unlist and hide the API everywhere. Its call history is kept for stats. */
+export async function archiveApi(api: ApiRow): Promise<ApiRow> {
+  const [row] = await db
+    .update(apis)
+    .set({ archivedAt: new Date(), listed: false })
+    .where(eq(apis.id, api.id))
+    .returning();
+  return row;
 }
 
 export interface UpdateApiInput {
@@ -222,6 +282,8 @@ export interface UpdateApiInput {
   openapiSpec?: string | Record<string, unknown> | null;
   timeoutMs?: number | null;
   tags?: string[];
+  payerAllowlist?: string[] | null;
+  payerDenylist?: string[];
   listed?: boolean;
 }
 
@@ -251,7 +313,8 @@ export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<Api
     allowedMethods: input.allowedMethods,
     timeoutMs: clampTimeout(input.timeoutMs),
     tags: input.tags,
-    openapiSpec: checkedOpenApiSpec(input.openapiSpec),
+    payerAllowlist: input.payerAllowlist,
+    payerDenylist: input.payerDenylist,
     ...encryptedHeader(input.upstreamHeader),
     ...encryptedQueryParam(input.upstreamQueryParam),
   };
@@ -343,6 +406,7 @@ export interface RecordCallInput {
   path: string;
   responseStatus: number;
   durationMs: number;
+  txHash?: string | null;
 }
 
 export async function recordApiCall(input: RecordCallInput): Promise<void> {
@@ -373,4 +437,50 @@ export async function listRecentCalls(apiId: string, limit: number) {
     .where(eq(apiCalls.apiId, apiId))
     .orderBy(desc(apiCalls.createdAt))
     .limit(limit);
+}
+
+/** One data point in a time-series response: calls and revenue for a single calendar day. */
+export interface TimeSeriesPoint {
+  date: string; // ISO date yyyy-mm-dd in UTC
+  calls: number;
+  revenue: string; // USDC, as decimal string
+}
+
+/**
+ * Returns one row per UTC calendar day, covering the last `days` days (today
+ * inclusive). Days with no calls are filled in with zeros so the caller always
+ * gets a contiguous series.
+ */
+export async function getApiTimeSeries(
+  apiId: string,
+  days: 7 | 30 | 90,
+): Promise<TimeSeriesPoint[]> {
+  const rows = await db
+    .select({
+      date: sql<string>`to_char(date_trunc('day', ${apiCalls.createdAt} at time zone 'UTC'), 'YYYY-MM-DD')`,
+      calls: sql<number>`count(*)::int`,
+      revenue: sql<string>`coalesce(sum(${apiCalls.amount}::numeric) filter (where ${apiCalls.charged}), 0)::text`,
+    })
+    .from(apiCalls)
+    .where(
+      and(
+        eq(apiCalls.apiId, apiId),
+        sql`${apiCalls.createdAt} >= now() - interval '${sql.raw(String(days))} days'`,
+      ),
+    )
+    .groupBy(sql`1`)
+    .orderBy(sql`1`);
+
+  // Build a map so we can fill in missing dates with zeros.
+  const byDate = new Map(rows.map((r) => [r.date, r]));
+
+  const result: TimeSeriesPoint[] = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
+    const dateStr = d.toISOString().slice(0, 10);
+    const row = byDate.get(dateStr);
+    result.push({ date: dateStr, calls: row?.calls ?? 0, revenue: row?.revenue ?? "0" });
+  }
+  return result;
 }

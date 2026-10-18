@@ -166,6 +166,13 @@ const openapiSpec = z.union([z.string().min(1), z.record(z.string(), z.unknown()
 
 const tagList = z.array(z.string().trim().min(1).max(32).toLowerCase()).max(10);
 
+export const PAYER_LIST_MAX = 500;
+
+const payerList = z
+  .array(z.string().regex(/^G[A-Z2-7]{55}$/, "payer lists must hold Stellar public keys (G...)"))
+  .max(PAYER_LIST_MAX)
+  .transform((list) => [...new Set(list)]);
+
 export const createApiSchema = z
   .object({
     name: z.string().trim().min(1).max(120),
@@ -179,6 +186,9 @@ export const createApiSchema = z
     openapiSpec: openapiSpec.optional(),
     timeoutMs: z.number().int().min(1000).optional(),
     tags: tagList.default([]),
+    // Only these wallets may call the API; omit to allow everyone.
+    payerAllowlist: payerList.optional(),
+    payerDenylist: payerList.default([]),
   })
   .strict();
 
@@ -195,20 +205,25 @@ export const updateApiSchema = z
     openapiSpec: openapiSpec.nullable().optional(),
     timeoutMs: z.number().int().min(1000).nullable().optional(),
     tags: tagList.optional(),
+    // null removes the allowlist, opening the API to every wallet again.
+    payerAllowlist: payerList.nullable().optional(),
+    payerDenylist: payerList.optional(),
     listed: z.boolean().optional(),
   })
   .strict();
 
-const signedXdr = z.string().min(1).max(20_000);
-
-export const signedXdrSchema = z.object({ signedXdr }).strict();
-
-export const prepareApiPriceSchema = z.object({ price: usdcPrice }).strict();
-
-export const confirmApiPriceSchema = z.object({ price: usdcPrice, signedXdr }).strict();
+export const apiCatalogSortValues = ["newest", "price_asc", "price_desc", "popular"] as const;
 
 export const apiCatalogQuerySchema = z.object({
   q: z.string().trim().max(100).optional(),
+  // ?tag=a&tag=b — repeatable; an API must carry every requested tag.
+  tag: z
+    .preprocess(
+      (v) => (v === undefined ? undefined : Array.isArray(v) ? v : [v]),
+      z.array(z.string().trim().min(1).max(32).toLowerCase()).max(10),
+    )
+    .optional(),
+  sort: z.enum(apiCatalogSortValues).default("newest"),
   limit: z.coerce.number().int().min(1).max(CATALOG_MAX_LIMIT).default(CATALOG_DEFAULT_LIMIT),
   offset: z.coerce.number().int().min(0).default(0),
 });

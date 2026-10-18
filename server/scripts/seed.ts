@@ -1,166 +1,107 @@
-/**
- * Seed script — populates the catalog with sample resources for local dev.
- *
- * Safe to re-run: skips any resource whose title already exists for the seed
- * publisher (identified by the fixed seed email).
- *
- * Usage:
- *   pnpm seed                  # DB only
- *   pnpm seed --onchain        # DB + register each resource on Stellar testnet
- */
+import { PrismaClient } from '@prisma/client';
 
-import { eq } from "drizzle-orm";
-import { db } from "../src/db/client.js";
-import { publishers, resources } from "../src/db/schema.js";
-import { registerPublisher } from "../src/services/publisherService.js";
-import { createLinkResource } from "../src/services/resourceService.js";
-import { registryClient, registryKeypair } from "../src/services/registryClient.js";
-import { config } from "../src/config.js";
+const prisma = new PrismaClient();
 
-const SEED_EMAIL = "seed-dev@zentrixpay.local";
+const MOCK_UPSTREAM_BASE_URL =
+  process.env.MOCK_UPSTREAM_BASE_URL ?? 'http://localhost:4000';
 
-const SAMPLE_RESOURCES = [
+interface SeedApi {
+  name: string;
+  slug: string;
+  description: string;
+  upstreamPath: string;
+  pricePerCallCents: number;
+}
+
+const DEMO_PROVIDER = {
+  name: 'Demo Provider',
+  slug: 'demo-provider',
+  description: 'A demo provider used for local development and UI work.',
+  contactEmail: 'demo@example.com',
+};
+
+const DEMO_APIS: SeedApi[] = [
   {
-    title: "GPT Prompt Engineering Cheatsheet",
-    description: "A concise reference for writing effective prompts across major LLM providers.",
-    price: "0.25",
-    externalUrl: "https://example.com/prompt-cheatsheet",
+    name: 'Echo',
+    slug: 'echo',
+    description: 'Echoes back the request payload. Useful for smoke tests.',
+    upstreamPath: '/echo',
+    pricePerCallCents: 1,
   },
   {
-    title: "Stellar Smart Contract Patterns",
-    description: "Common Soroban contract patterns with annotated Rust examples.",
-    price: "0.50",
-    externalUrl: "https://example.com/soroban-patterns",
+    name: 'Weather',
+    slug: 'weather',
+    description: 'Returns mock weather data for a given city.',
+    upstreamPath: '/weather',
+    pricePerCallCents: 2,
   },
   {
-    title: "AI Agent Evaluation Dataset",
-    description: "500 labelled task/response pairs for benchmarking autonomous agents.",
-    price: "1.00",
-    externalUrl: "https://example.com/agent-eval-dataset",
+    name: 'Currency Rates',
+    slug: 'currency-rates',
+    description: 'Returns mock foreign exchange rates.',
+    upstreamPath: '/rates',
+    pricePerCallCents: 3,
   },
   {
-    title: "Minimal RAG Pipeline (Python)",
-    description: "A single-file retrieval-augmented generation pipeline using FAISS and OpenAI.",
-    price: "0.10",
-    externalUrl: "https://example.com/rag-pipeline",
+    name: 'Text Summarizer',
+    slug: 'text-summarizer',
+    description: 'Returns a mock summary for the provided text.',
+    upstreamPath: '/summarize',
+    pricePerCallCents: 5,
   },
-  {
-    title: "DeFi Yield Farming Research Report",
-    description: "Analysis of yield strategies across Stellar, Ethereum, and Solana ecosystems.",
-    price: "2.00",
-    externalUrl: "https://example.com/defi-yield-report",
-  },
-] as const;
+];
 
-async function getOrCreateSeedPublisher() {
-  const [existing] = await db
-    .select()
-    .from(publishers)
-    .where(eq(publishers.email, SEED_EMAIL))
-    .limit(1);
-
-  if (existing) {
-    console.log(`  Publisher already exists (id: ${existing.id})`);
-    return existing;
-  }
-
-  const { publisher } = await registerPublisher({
-    name: "ZentrixPay Seed",
-    email: SEED_EMAIL,
-    walletAddress: config.PAY_TO,
+async function main(): Promise<void> {
+  const provider = await prisma.provider.upsert({
+    where: { slug: DEMO_PROVIDER.slug },
+    update: {
+      name: DEMO_PROVIDER.name,
+      description: DEMO_PROVIDER.description,
+      contactEmail: DEMO_PROVIDER.contactEmail,
+    },
+    create: {
+      name: DEMO_PROVIDER.name,
+      slug: DEMO_PROVIDER.slug,
+      description: DEMO_PROVIDER.description,
+      contactEmail: DEMO_PROVIDER.contactEmail,
+    },
   });
-  console.log(`  Created seed publisher (id: ${publisher.id})`);
-  return publisher;
-}
 
-async function seedResources(publisherId: string, onchain: boolean) {
-  const existing = await db
-    .select({ title: resources.title })
-    .from(resources)
-    .where(eq(resources.publisherId, publisherId));
+  for (const api of DEMO_APIS) {
+    const upstreamUrl = `${MOCK_UPSTREAM_BASE_URL}${api.upstreamPath}`;
 
-  const existingTitles = new Set(existing.map((r) => r.title));
-
-  for (const sample of SAMPLE_RESOURCES) {
-    if (existingTitles.has(sample.title)) {
-      console.log(`  Skipping "${sample.title}" (already exists)`);
-      continue;
-    }
-
-    const resource = await createLinkResource({
-      publisherId,
-      title: sample.title,
-      description: sample.description,
-      price: sample.price,
-      walletAddress: config.PAY_TO,
-      externalUrl: sample.externalUrl,
+    await prisma.api.upsert({
+      where: { slug: api.slug },
+      update: {
+        name: api.name,
+        description: api.description,
+        upstreamUrl,
+        pricePerCallCents: api.pricePerCallCents,
+        listed: true,
+        providerId: provider.id,
+      },
+      create: {
+        name: api.name,
+        slug: api.slug,
+        description: api.description,
+        upstreamUrl,
+        pricePerCallCents: api.pricePerCallCents,
+        listed: true,
+        providerId: provider.id,
+      },
     });
-
-    // Mark as verified + listed so it appears in the catalog immediately
-    await db
-      .update(resources)
-      .set({ verificationStatus: "verified", listed: true })
-      .where(eq(resources.id, resource.id));
-
-    console.log(`  Created "${sample.title}" ($${sample.price}) — id: ${resource.id}`);
-
-    if (onchain) {
-      await registerOnChain(resource);
-    }
   }
+
+  console.log(
+    `Seeded provider "${provider.name}" with ${DEMO_APIS.length} listed APIs.`,
+  );
 }
 
-async function registerOnChain(resource: {
-  id: string;
-  title: string;
-  description: string | null;
-  price: string;
-  contentHash: string | null;
-  mimeType: string | null;
-}) {
-  try {
-    const metadata = JSON.stringify({
-      title: resource.title,
-      description: resource.description,
-      contentHash: resource.contentHash,
-      mimeType: resource.mimeType,
-    });
-
-    const tx = await registryClient.register({
-      creator: registryKeypair.publicKey(),
-      id: resource.id,
-      price: BigInt(Math.round(parseFloat(resource.price) * 10_000_000)),
-      metadata,
-      tags: [],
-    });
-
-    await tx.signAndSend({ signer: registryKeypair });
-
-    await db
-      .update(resources)
-      .set({ onchainStatus: "registered" })
-      .where(eq(resources.id, resource.id));
-
-    console.log(`    ✓ Registered on-chain`);
-  } catch (err) {
-    console.warn(`    ⚠ On-chain registration failed: ${(err as Error).message}`);
-  }
-}
-
-async function main() {
-  const onchain = process.argv.includes("--onchain");
-
-  console.log("Seeding ZentrixPay catalog...");
-  if (onchain) console.log("  (--onchain: will register on Stellar testnet)");
-
-  const publisher = await getOrCreateSeedPublisher();
-  await seedResources(publisher.id, onchain);
-
-  console.log("Done.");
-  process.exit(0);
-}
-
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+main()
+  .catch((error) => {
+    console.error('Seed failed:', error);
+    process.exitCode = 1;
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });

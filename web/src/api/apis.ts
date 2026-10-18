@@ -116,10 +116,21 @@ async function readJson<T>(res: Response): Promise<T> {
   return body as T;
 }
 
-export async function fetchApis(q: string, signal?: AbortSignal): Promise<PublicApi[]> {
+export async function fetchApis(
+  q: string,
+  signal?: AbortSignal,
+  limit = 20,
+  offset = 0,
+): Promise<PublicApi[]> {
   const url = new URL(`${API_BASE}/apis`, window.location.origin);
   if (q.trim()) url.searchParams.set("q", q.trim());
-  url.searchParams.set("limit", "100");
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("offset", String(offset));
+  return readJson(await fetch(url, { signal }));
+}
+
+export async function fetchApiById(id: string, signal?: AbortSignal): Promise<PublicApi> {
+  const url = new URL(`${API_BASE}/apis/${encodeURIComponent(id)}`, window.location.origin);
   return readJson(await fetch(url, { signal }));
 }
 
@@ -171,152 +182,33 @@ export async function verifyApiOwnership(apiKey: string, id: string): Promise<Ow
   );
 }
 
+/** Archive (soft-delete) an API: it disappears from the catalog and dashboard; stats remain. */
+export async function archiveApi(apiKey: string, id: string): Promise<void> {
+  await readJson(await signedPublisherFetch(absolute(`/apis/${id}`), apiKey, { method: "DELETE" }));
+}
+
 export async function fetchApiStats(apiKey: string, id: string): Promise<ApiStats> {
   return readJson(await signedPublisherFetch(absolute(`/apis/${id}/stats`), apiKey));
 }
 
-/** A transaction the server built for the provider's wallet to sign. */
-export interface PreparedTx {
-  unsignedXdr: string;
-  networkPassphrase: string;
+export interface TimeSeriesPoint {
+  date: string; // yyyy-mm-dd
+  calls: number;
+  revenue: string;
 }
 
-export async function prepareApiRegistration(apiKey: string, id: string): Promise<PreparedTx> {
-  return readJson(await signedPublisherFetch(absolute(`/apis/${id}/register/prepare`), apiKey));
+export interface ApiTimeSeries {
+  apiId: string;
+  days: 7 | 30 | 90;
+  series: TimeSeriesPoint[];
 }
 
-export async function submitApiRegistration(
+export async function fetchApiTimeSeries(
   apiKey: string,
   id: string,
-  signedXdr: string,
-): Promise<OwnerApi> {
+  days: 7 | 30 | 90,
+): Promise<ApiTimeSeries> {
   return readJson(
-    await signedPublisherFetch(absolute(`/apis/${id}/register`), apiKey, {
-      method: "POST",
-      body: JSON.stringify({ signedXdr }),
-    }),
+    await signedPublisherFetch(absolute(`/apis/${id}/stats/time-series?days=${days}`), apiKey),
   );
-}
-
-export async function prepareApiPrice(
-  apiKey: string,
-  id: string,
-  price: string,
-): Promise<PreparedTx> {
-  return readJson(
-    await signedPublisherFetch(absolute(`/apis/${id}/price/prepare`), apiKey, {
-      method: "POST",
-      body: JSON.stringify({ price }),
-    }),
-  );
-}
-
-export async function submitApiPrice(
-  apiKey: string,
-  id: string,
-  price: string,
-  signedXdr: string,
-): Promise<OwnerApi> {
-  return readJson(
-    await signedPublisherFetch(absolute(`/apis/${id}/price`), apiKey, {
-      method: "POST",
-      body: JSON.stringify({ price, signedXdr }),
-    }),
-  );
-}
-
-export async function prepareCallRefund(
-  apiKey: string,
-  id: string,
-  callId: string,
-): Promise<PreparedTx> {
-  return readJson(
-    await signedPublisherFetch(absolute(`/apis/${id}/calls/${callId}/refund/prepare`), apiKey, {
-      method: "POST",
-    }),
-  );
-}
-
-export async function submitCallRefund(
-  apiKey: string,
-  id: string,
-  callId: string,
-  signedXdr: string,
-): Promise<ApiCall> {
-  return readJson(
-    await signedPublisherFetch(absolute(`/apis/${id}/calls/${callId}/refund`), apiKey, {
-      method: "POST",
-      body: JSON.stringify({ signedXdr }),
-    }),
-  );
-}
-
-// ── OpenAPI ──────────────────────────────────────────────────────────────────
-
-export interface ApiEndpoint {
-  method: string;
-  path: string;
-  summary: string | null;
-  parameters: { name: string; in: string; required: boolean; description: string | null }[];
-  hasRequestBody: boolean;
-}
-
-export async function fetchOpenApiSpec(
-  url: string,
-  signal?: AbortSignal,
-): Promise<Record<string, unknown>> {
-  return readJson(await fetch(url, { signal }));
-}
-
-const OPERATIONS = ["get", "post", "put", "patch", "delete", "head", "options", "trace"];
-
-type Obj = Record<string, unknown>;
-const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
-
-/** Resolve a local `#/components/...` reference, or return the node unchanged. */
-function deref(spec: Obj, node: unknown): unknown {
-  if (!isObj(node) || typeof node.$ref !== "string" || !node.$ref.startsWith("#/")) return node;
-  let cur: unknown = spec;
-  for (const part of node.$ref.slice(2).split("/")) {
-    if (!isObj(cur)) return node;
-    cur = cur[part.replace(/~1/g, "/").replace(/~0/g, "~")];
-  }
-  return cur ?? node;
-}
-
-/** Flatten an OpenAPI document into a list of endpoints for display. */
-export function endpointsFromSpec(spec: Obj): ApiEndpoint[] {
-  const out: ApiEndpoint[] = [];
-  const paths = isObj(spec.paths) ? spec.paths : {};
-  for (const [path, rawItem] of Object.entries(paths)) {
-    const item = deref(spec, rawItem);
-    if (!isObj(item)) continue;
-    const shared = Array.isArray(item.parameters) ? item.parameters : [];
-    for (const method of OPERATIONS) {
-      const op = item[method];
-      if (!isObj(op)) continue;
-      const params = [...shared, ...(Array.isArray(op.parameters) ? op.parameters : [])]
-        .map((p) => deref(spec, p))
-        .filter(isObj)
-        .map((p) => ({
-          name: String(p.name ?? ""),
-          in: String(p.in ?? ""),
-          required: p.required === true,
-          description: typeof p.description === "string" ? p.description : null,
-        }));
-      out.push({
-        method: method.toUpperCase(),
-        path,
-        summary:
-          typeof op.summary === "string"
-            ? op.summary
-            : typeof op.description === "string"
-              ? op.description
-              : null,
-        parameters: params,
-        hasRequestBody: op.requestBody !== undefined,
-      });
-    }
-  }
-  return out;
 }
