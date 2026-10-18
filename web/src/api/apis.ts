@@ -163,3 +163,25 @@ export async function verifyApiOwnership(apiKey: string, id: string): Promise<Ow
 export async function fetchApiStats(apiKey: string, id: string): Promise<ApiStats> {
   return readJson(await signedPublisherFetch(absolute(`/apis/${id}/stats`), apiKey));
 }
+
+export interface TimeSeriesPoint {
+  date: string; // yyyy-mm-dd
+  calls: number;
+  revenue: string;
+}
+
+export interface ApiTimeSeries {
+  apiId: string;
+  days: 7 | 30 | 90;
+  series: TimeSeriesPoint[];
+}
+
+export async function fetchApiTimeSeries(
+  apiKey: string,
+  id: string,
+  days: 7 | 30 | 90,
+): Promise<ApiTimeSeries> {
+  return readJson(
+    await signedPublisherFetch(absolute(`/apis/${id}/stats/time-series?days=${days}`), apiKey),
+  );
+}
