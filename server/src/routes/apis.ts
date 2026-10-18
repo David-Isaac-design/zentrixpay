@@ -1,6 +1,7 @@
 import express, { Router, type Router as RouterType, type Request, type Response } from "express";
 import { apiKeyAuth } from "../middleware/apiKeyAuth.js";
 import { requestSignatureAuth } from "../middleware/requestSignatureAuth.js";
+import { payeeSignatureAuth } from "../middleware/payeeSignatureAuth.js";
 import { validate } from "../middleware/validate.js";
 import { publishIpRateLimit, publishWalletRateLimit } from "../middleware/rateLimiters.js";
 import { apiPaywall, loadProxiedApi } from "../middleware/apiPaywall.js";
@@ -96,14 +97,29 @@ router.get("/apis/:id", async (req, res) => {
 });
 
 // PATCH /apis/:id — update price, upstream, methods, secret header, listing (owner)
+// Changing walletAddress additionally requires a signature from the current payee wallet
+// (X-Payee-Timestamp + X-Payee-Signature headers) to prevent a compromised API key
+// from silently redirecting all revenue to an attacker-controlled address.
 router.patch(
   "/apis/:id",
   apiKeyAuth,
   requestSignatureAuth,
-  validate(updateApiSchema),
-  async (req, res) => {
+  // Load the API and stash it in res.locals.api so payeeSignatureAuth can read
+  // the current walletAddress without a second DB round-trip in the handler.
+  async (req, res, next) => {
     try {
       const api = await getOwnedApi(req.params.id as string, req.publisher!.id);
+      res.locals.api = api;
+      next();
+    } catch (err) {
+      sendServiceError(res, err);
+    }
+  },
+  validate(updateApiSchema),
+  payeeSignatureAuth,
+  async (req, res) => {
+    try {
+      const api = res.locals.api as ApiRow;
       res.json(toOwnerApi(await updateApi(api, req.body)));
     } catch (err) {
       sendServiceError(res, err);
