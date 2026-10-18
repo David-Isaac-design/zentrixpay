@@ -99,9 +99,23 @@ async function readJson<T>(res: Response): Promise<T> {
   return body as T;
 }
 
-export async function fetchApis(q: string, signal?: AbortSignal): Promise<PublicApi[]> {
+export const API_SORTS = ["newest", "price_asc", "price_desc", "popular"] as const;
+export type ApiSort = (typeof API_SORTS)[number];
+
+export interface ApiCatalogQuery {
+  q?: string;
+  tags?: string[];
+  sort?: ApiSort;
+}
+
+export async function fetchApis(
+  { q = "", tags = [], sort = "newest" }: ApiCatalogQuery,
+  signal?: AbortSignal,
+): Promise<PublicApi[]> {
   const url = new URL(`${API_BASE}/apis`, window.location.origin);
   if (q.trim()) url.searchParams.set("q", q.trim());
+  for (const tag of tags) url.searchParams.append("tag", tag);
+  if (sort !== "newest") url.searchParams.set("sort", sort);
   url.searchParams.set("limit", "100");
   return readJson(await fetch(url, { signal }));
 }
@@ -152,6 +166,11 @@ export async function verifyApiOwnership(apiKey: string, id: string): Promise<Ow
       method: "POST",
     }),
   );
+}
+
+/** Archive (soft-delete) an API: it disappears from the catalog and dashboard; stats remain. */
+export async function archiveApi(apiKey: string, id: string): Promise<void> {
+  await readJson(await signedPublisherFetch(absolute(`/apis/${id}`), apiKey, { method: "DELETE" }));
 }
 
 export async function fetchApiStats(apiKey: string, id: string): Promise<ApiStats> {

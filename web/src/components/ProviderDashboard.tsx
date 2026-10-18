@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import {
   HTTP_METHODS,
+  archiveApi,
   createApi,
   fetchApiStats,
   fetchMyApis,
@@ -413,14 +414,17 @@ function ApiCard({
   api,
   apiKey,
   onChanged,
+  onArchived,
   onCopy,
 }: {
   api: OwnerApi;
   apiKey: string;
   onChanged: (api: OwnerApi) => void;
+  onArchived: (id: string) => void;
   onCopy: (text: string) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
+  const [confirmArchive, setConfirmArchive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [price, setPrice] = useState(api.price);
   const [stats, setStats] = useState<ApiStats | null>(null);
@@ -551,7 +555,45 @@ function ApiCard({
         >
           {stats ? "Hide stats" : busy === "Stats" ? "Loading…" : "Stats"}
         </button>
+        {confirmArchive ? (
+          <>
+            <button
+              className="rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+              disabled={busy !== null}
+              onClick={() =>
+                run("Archive", async () => {
+                  await archiveApi(apiKey, api.id);
+                  onArchived(api.id);
+                })
+              }
+            >
+              {busy === "Archive" ? "Archiving…" : "Confirm archive"}
+            </button>
+            <button
+              className={secondaryButton}
+              disabled={busy !== null}
+              onClick={() => setConfirmArchive(false)}
+            >
+              Keep
+            </button>
+          </>
+        ) : (
+          <button
+            className={`${secondaryButton} text-red-600 dark:text-red-400`}
+            disabled={busy !== null}
+            onClick={() => setConfirmArchive(true)}
+          >
+            Archive
+          </button>
+        )}
       </div>
+
+      {confirmArchive && busy !== "Archive" && (
+        <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+          Archiving removes this API from the catalog and your dashboard and stops paid calls. Its
+          call history is kept.
+        </p>
+      )}
 
       {error && (
         <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">
@@ -640,6 +682,7 @@ export function ProviderDashboard({
               apiKey={apiKey}
               onCopy={onCopy}
               onChanged={(updated) => setLocal((prev) => ({ ...prev, [updated.id]: updated }))}
+              onArchived={() => setRefresh((n) => n + 1)}
             />
           ))}
         </ul>

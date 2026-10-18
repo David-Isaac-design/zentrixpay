@@ -1,7 +1,19 @@
 import React, { useEffect, useState } from "react";
-import { fetchApis, type PublicApi } from "../api/apis.js";
+import { API_SORTS, fetchApis, type ApiSort, type PublicApi } from "../api/apis.js";
 import { useAsync } from "../hooks/useAsync.js";
 import { ErrorBanner } from "./ErrorBanner.js";
+
+const SORT_LABELS: Record<ApiSort, string> = {
+  newest: "Newest",
+  price_asc: "Price: low to high",
+  price_desc: "Price: high to low",
+  popular: "Most popular (7 days)",
+};
+
+const chipBase = "rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors";
+const chipOff =
+  "bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/30 dark:text-emerald-300 dark:hover:bg-emerald-900/50";
+const chipOn = "bg-emerald-600 text-white hover:bg-emerald-700";
 
 interface Props {
   onTry: (api: PublicApi) => void;
@@ -11,6 +23,10 @@ interface Props {
 export function ApiCatalog({ onTry, onCopy }: Props) {
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
+  const [sort, setSort] = useState<ApiSort>("newest");
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  // Tags seen in any result so far, so chips stay put while a filter narrows the list.
+  const [knownTags, setKnownTags] = useState<string[]>([]);
 
   useEffect(() => {
     const id = setTimeout(() => setDebounced(query), 250);
@@ -18,9 +34,26 @@ export function ApiCatalog({ onTry, onCopy }: Props) {
   }, [query]);
 
   const { status, data, error, retry } = useAsync<PublicApi[]>(
-    (signal) => fetchApis(debounced, signal),
-    [debounced],
+    (signal) => fetchApis({ q: debounced, tags: selectedTags, sort }, signal),
+    [debounced, selectedTags, sort],
   );
+
+  useEffect(() => {
+    if (!data) return;
+    setKnownTags((prev) => {
+      const next = new Set(prev);
+      for (const api of data) for (const tag of api.tags) next.add(tag);
+      return next.size === prev.length ? prev : [...next].sort();
+    });
+  }, [data]);
+
+  function toggleTag(tag: string) {
+    setSelectedTags((prev) =>
+      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag].sort(),
+    );
+  }
+
+  const filtering = Boolean(debounced) || selectedTags.length > 0;
 
   return (
     <section aria-labelledby="catalog-heading">
@@ -28,15 +61,61 @@ export function ApiCatalog({ onTry, onCopy }: Props) {
         <h2 id="catalog-heading" className="text-lg font-semibold text-gray-900 dark:text-gray-100">
           APIs you can call
         </h2>
-        <input
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search APIs…"
-          aria-label="Search APIs"
-          className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 sm:w-72"
-        />
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search APIs…"
+            aria-label="Search APIs"
+            className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 sm:w-72"
+          />
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value as ApiSort)}
+            aria-label="Sort APIs"
+            className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+          >
+            {API_SORTS.map((s) => (
+              <option key={s} value={s}>
+                {SORT_LABELS[s]}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
+
+      {knownTags.length > 0 && (
+        <div
+          className="mb-4 flex flex-wrap items-center gap-1.5"
+          role="group"
+          aria-label="Filter by tag"
+        >
+          {knownTags.map((tag) => {
+            const on = selectedTags.includes(tag);
+            return (
+              <button
+                key={tag}
+                type="button"
+                aria-pressed={on}
+                onClick={() => toggleTag(tag)}
+                className={`${chipBase} ${on ? chipOn : chipOff}`}
+              >
+                #{tag}
+              </button>
+            );
+          })}
+          {selectedTags.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setSelectedTags([])}
+              className="ml-1 text-xs text-gray-500 underline hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+            >
+              Clear tags
+            </button>
+          )}
+        </div>
+      )}
 
       {status === "error" && (
         <ErrorBanner message={error ?? "Failed to load APIs"} onRetry={retry} />
@@ -52,7 +131,7 @@ export function ApiCatalog({ onTry, onCopy }: Props) {
 
       {data && data.length === 0 && (
         <p className="rounded-xl border border-dashed border-gray-300 p-8 text-center text-sm text-gray-500 dark:border-gray-700 dark:text-gray-400">
-          {debounced ? `No APIs match “${debounced}”.` : "No APIs are listed yet."}
+          {filtering ? "No APIs match these filters." : "No APIs are listed yet."}
         </p>
       )}
 
@@ -85,12 +164,18 @@ export function ApiCatalog({ onTry, onCopy }: Props) {
                   </span>
                 ))}
                 {api.tags.map((tag) => (
-                  <span
+                  <button
                     key={tag}
-                    className="rounded bg-emerald-50 px-1.5 py-0.5 text-xs text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                    type="button"
+                    aria-pressed={selectedTags.includes(tag)}
+                    onClick={() => toggleTag(tag)}
+                    title={
+                      selectedTags.includes(tag) ? `Remove #${tag} filter` : `Filter by #${tag}`
+                    }
+                    className={`rounded px-1.5 py-0.5 text-xs ${selectedTags.includes(tag) ? chipOn : chipOff}`}
                   >
                     #{tag}
-                  </span>
+                  </button>
                 ))}
               </div>
               <div className="mt-auto flex gap-2">

@@ -175,8 +175,18 @@ export const updateApiSchema = z
   })
   .strict();
 
+export const apiCatalogSortValues = ["newest", "price_asc", "price_desc", "popular"] as const;
+
 export const apiCatalogQuerySchema = z.object({
   q: z.string().trim().max(100).optional(),
+  // ?tag=a&tag=b — repeatable; an API must carry every requested tag.
+  tag: z
+    .preprocess(
+      (v) => (v === undefined ? undefined : Array.isArray(v) ? v : [v]),
+      z.array(z.string().trim().min(1).max(32).toLowerCase()).max(10),
+    )
+    .optional(),
+  sort: z.enum(apiCatalogSortValues).default("newest"),
   limit: z.coerce.number().int().min(1).max(CATALOG_MAX_LIMIT).default(CATALOG_DEFAULT_LIMIT),
   offset: z.coerce.number().int().min(0).default(0),
 });
