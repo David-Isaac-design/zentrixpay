@@ -1,12 +1,12 @@
 import { randomBytes } from "node:crypto";
-import { and, desc, eq, ilike, isNotNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { apiCalls, apis } from "../db/schema.js";
 import { config } from "../config.js";
 import { encryptSecret } from "../utils/secretBox.js";
 import { validateUpstreamUrl } from "../lib/upstreamGuard.js";
 import { sendUpstream } from "../lib/upstreamClient.js";
-import { createTtlCache } from "../lib/ttlCache.js";
+import type { apiCatalogSortValues } from "../schemas/requests.js";
 
 export type ApiRow = typeof apis.$inferSelect;
 
@@ -45,10 +45,26 @@ export function toPublicApi(api: ApiRow) {
     walletAddress: api.walletAddress,
     allowedMethods: api.allowedMethods,
     tags: api.tags,
-    healthy: api.healthy,
-    proxyUrl: `${config.BASE_URL}/api/${api.id}`,
+    proxyUrl: proxyUrlOf(api),
+    openapiUrl: api.openapiSpec ? `${config.BASE_URL}/apis/${api.id}/openapi.json` : null,
+    // Where callers can check price and payee for themselves.
+    onchain: {
+      registered: api.onchainStatus === "registered",
+      contractId: config.REGISTRY_CONTRACT_ID,
+      txHash: api.onchainTxHash,
+    },
     createdAt: api.createdAt,
   };
+}
+
+function proxyUrlOf(api: ApiRow): string {
+  return `${config.BASE_URL}/api/${api.id}`;
+}
+
+/** The API's OpenAPI document as callers see it, or null if it has none. */
+export function toPublicOpenApi(api: ApiRow) {
+  if (!api.openapiSpec) return null;
+  return publicOpenApiSpec(api.openapiSpec, api.upstreamUrl, proxyUrlOf(api));
 }
 
 /** What the owning provider sees. Includes the upstream URL but never the secret value. */
@@ -58,17 +74,13 @@ export function toOwnerApi(api: ApiRow) {
     upstreamUrl: api.upstreamUrl,
     upstreamHeaderName: api.upstreamHeaderName,
     hasUpstreamSecret: Boolean(api.upstreamHeaderValueEnc),
+    upstreamQueryParamName: api.upstreamQueryName,
+    hasUpstreamQuerySecret: Boolean(api.upstreamQueryValueEnc),
     timeoutMs: api.timeoutMs,
-    maxResponseBytes: api.maxResponseBytes,
-    webhookUrl: api.webhookUrl,
-    hasWebhookSecret: Boolean(api.webhookSecretEnc),
-    healthPath: api.healthPath,
-    health: {
-      healthy: api.healthy,
-      consecutiveFailures: api.healthFailures,
-      lastCheckedAt: api.lastHealthCheckAt,
-    },
+    payerAllowlist: api.payerAllowlist,
+    payerDenylist: api.payerDenylist,
     listed: api.listed,
+    onchainStatus: api.onchainStatus,
     ownershipVerified: Boolean(api.ownershipVerifiedAt),
     ownershipVerification: {
       url: ownershipFileUrl(api.upstreamUrl),
@@ -114,19 +126,24 @@ function encryptedHeader(header: { name: string; value: string } | null | undefi
   };
 }
 
-function encryptedWebhook(webhook: { url: string; secret: string } | null | undefined) {
-  if (webhook === undefined) return {};
-  if (webhook === null) return { webhookUrl: null, webhookSecretEnc: null };
-  let url: string;
+function encryptedQueryParam(param: { name: string; value: string } | null | undefined) {
+  if (param === undefined) return {};
+  if (param === null) return { upstreamQueryName: null, upstreamQueryValueEnc: null };
+  // Query parameter names are case-sensitive, so the name is kept as given.
+  return {
+    upstreamQueryName: param.name,
+    upstreamQueryValueEnc: encryptSecret(param.value, secretKey()),
+  };
+}
+
+function checkedOpenApiSpec(spec: string | Record<string, unknown> | null | undefined) {
+  if (spec === undefined || spec === null) return spec;
   try {
-    url = validateUpstreamUrl(webhook.url, {
-      allowPrivate: config.PROXY_ALLOW_PRIVATE_UPSTREAMS,
-      field: "webhook.url",
-    }).toString();
+    return parseOpenApiSpec(spec);
   } catch (err) {
-    throw new ApiServiceError(400, (err as Error).message);
+    if (err instanceof OpenApiSpecError) throw new ApiServiceError(400, err.message);
+    throw err;
   }
-  return { webhookUrl: url, webhookSecretEnc: encryptSecret(webhook.secret, secretKey()) };
 }
 
 function clampTimeout(timeoutMs: number | undefined | null): number | null | undefined {
@@ -164,11 +181,15 @@ export interface CreateApiInput {
   walletAddress: string;
   allowedMethods: string[];
   upstreamHeader?: { name: string; value: string };
+  upstreamQueryParam?: { name: string; value: string };
+  openapiSpec?: string | Record<string, unknown>;
   timeoutMs?: number;
   maxResponseBytes?: number;
   webhook?: { url: string; secret: string };
   healthPath?: string;
   tags: string[];
+  payerAllowlist?: string[];
+  payerDenylist?: string[];
 }
 
 export async function createApi(input: CreateApiInput): Promise<ApiRow> {
@@ -186,17 +207,26 @@ export async function createApi(input: CreateApiInput): Promise<ApiRow> {
       maxResponseBytes: checkedMaxResponseBytes(input.maxResponseBytes),
       healthPath: input.healthPath,
       tags: input.tags,
+      payerAllowlist: input.payerAllowlist ?? null,
+      payerDenylist: input.payerDenylist ?? [],
       ownershipToken: randomBytes(16).toString("hex"),
+      openapiSpec: checkedOpenApiSpec(input.openapiSpec),
       ...encryptedHeader(input.upstreamHeader),
-      ...encryptedWebhook(input.webhook),
+      ...encryptedQueryParam(input.upstreamQueryParam),
     })
     .returning();
   return row;
 }
 
-export async function getApiById(id: string): Promise<ApiRow | null> {
+/** Load an API by id. Archived APIs are treated as missing unless `includeArchived` is set. */
+export async function getApiById(
+  id: string,
+  opts: { includeArchived?: boolean } = {},
+): Promise<ApiRow | null> {
   const rows = await db.select().from(apis).where(eq(apis.id, id));
-  return rows[0] ?? null;
+  const api = rows[0] ?? null;
+  if (api?.archivedAt && !opts.includeArchived) return null;
+  return api;
 }
 
 /** getApiById behind a short TTL cache, for the per-call proxy path (#34). */
@@ -209,24 +239,61 @@ export async function getProxiedApi(id: string): Promise<ApiRow | null> {
 }
 
 /** Load an API and require that `publisherId` owns it (404 otherwise, to avoid leaking ids). */
-export async function getOwnedApi(id: string, publisherId: string): Promise<ApiRow> {
-  const api = await getApiById(id);
+export async function getOwnedApi(
+  id: string,
+  publisherId: string,
+  opts: { includeArchived?: boolean } = {},
+): Promise<ApiRow> {
+  const api = await getApiById(id, opts);
   if (!api || api.publisherId !== publisherId) throw new ApiServiceError(404, "API not found");
   return api;
 }
 
-export async function listPublicApis(opts: { q?: string; limit: number; offset: number }) {
-  // Unhealthy APIs are hidden until a health check succeeds again (#35).
-  const conditions = [eq(apis.listed, true), eq(apis.healthy, true)];
+export type ApiCatalogSort = (typeof apiCatalogSortValues)[number];
+
+export interface ApiCatalogOptions {
+  q?: string;
+  tag?: string[];
+  sort?: ApiCatalogSort;
+  limit: number;
+  offset: number;
+}
+
+/** Window used to rank APIs by popularity (charged calls). */
+export const POPULARITY_WINDOW_DAYS = 7;
+
+export async function listPublicApis(opts: ApiCatalogOptions) {
+  const conditions = [eq(apis.listed, true), isNull(apis.archivedAt)];
   if (opts.q) {
     const pattern = `%${opts.q.replace(/[%_\\]/g, "\\$&")}%`;
     conditions.push(or(ilike(apis.name, pattern), ilike(apis.description, pattern))!);
   }
+  if (opts.tag?.length) {
+    // jsonb containment: the API's tags must include every requested tag.
+    conditions.push(sql`${apis.tags} @> ${JSON.stringify(opts.tag)}::jsonb`);
+  }
+
+  // Charged calls in the popularity window; correlated so it only runs for this sort.
+  const recentChargedCalls = sql`(
+    select count(*) from ${apiCalls}
+    where ${apiCalls.apiId} = ${apis.id}
+      and ${apiCalls.charged}
+      and ${apiCalls.createdAt} >= now() - make_interval(days => ${POPULARITY_WINDOW_DAYS})
+  )`;
+  const price = sql`${apis.price}::numeric`;
+  const order = {
+    newest: [desc(apis.createdAt)],
+    price_asc: [asc(price), desc(apis.createdAt)],
+    price_desc: [desc(price), desc(apis.createdAt)],
+    popular: [desc(recentChargedCalls), desc(apis.createdAt)],
+  }[opts.sort ?? "newest"];
+
   const rows = await db
     .select()
     .from(apis)
     .where(and(...conditions))
-    .orderBy(desc(apis.createdAt))
+    // id breaks ties so offset pagination is stable.
+    .orderBy(...order, asc(apis.id))
     .limit(opts.limit)
     .offset(opts.offset);
   return rows.map(toPublicApi);
@@ -236,9 +303,19 @@ export async function listPublisherApis(publisherId: string) {
   const rows = await db
     .select()
     .from(apis)
-    .where(eq(apis.publisherId, publisherId))
+    .where(and(eq(apis.publisherId, publisherId), isNull(apis.archivedAt)))
     .orderBy(desc(apis.createdAt));
   return rows.map(toOwnerApi);
+}
+
+/** Soft-delete: unlist and hide the API everywhere. Its call history is kept for stats. */
+export async function archiveApi(api: ApiRow): Promise<ApiRow> {
+  const [row] = await db
+    .update(apis)
+    .set({ archivedAt: new Date(), listed: false })
+    .where(eq(apis.id, api.id))
+    .returning();
+  return row;
 }
 
 export interface UpdateApiInput {
@@ -249,15 +326,36 @@ export interface UpdateApiInput {
   walletAddress?: string;
   allowedMethods?: string[];
   upstreamHeader?: { name: string; value: string } | null;
+  upstreamQueryParam?: { name: string; value: string } | null;
+  openapiSpec?: string | Record<string, unknown> | null;
   timeoutMs?: number | null;
   maxResponseBytes?: number | null;
   webhook?: { url: string; secret: string } | null;
   healthPath?: string | null;
   tags?: string[];
+  payerAllowlist?: string[] | null;
+  payerDenylist?: string[];
   listed?: boolean;
 }
 
 export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<ApiRow> {
+  // Once anchored on-chain, price and payee change only through the registry
+  // so the on-chain record never drifts from what callers are charged.
+  if (api.onchainStatus === "registered" || api.onchainStatus === "pending") {
+    if (input.price !== undefined && input.price !== api.price) {
+      throw new ApiServiceError(
+        409,
+        `This API's price is anchored on-chain; change it with POST /apis/${api.id}/price/prepare`,
+      );
+    }
+    if (input.walletAddress !== undefined && input.walletAddress !== api.walletAddress) {
+      throw new ApiServiceError(
+        409,
+        "The payout wallet of an API registered on-chain cannot change",
+      );
+    }
+  }
+
   const changes: Partial<typeof apis.$inferInsert> = {
     name: input.name,
     description: input.description,
@@ -267,8 +365,10 @@ export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<Api
     timeoutMs: clampTimeout(input.timeoutMs),
     maxResponseBytes: checkedMaxResponseBytes(input.maxResponseBytes),
     tags: input.tags,
+    payerAllowlist: input.payerAllowlist,
+    payerDenylist: input.payerDenylist,
     ...encryptedHeader(input.upstreamHeader),
-    ...encryptedWebhook(input.webhook),
+    ...encryptedQueryParam(input.upstreamQueryParam),
   };
 
   if (input.healthPath !== undefined && input.healthPath !== api.healthPath) {
@@ -292,6 +392,12 @@ export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<Api
     if (input.listed && !verified) {
       throw new ApiServiceError(409, "Verify ownership of the upstream before listing this API");
     }
+    if (input.listed && api.onchainStatus !== "registered") {
+      throw new ApiServiceError(
+        409,
+        `Register this API on-chain before listing it (GET /apis/${api.id}/register/prepare)`,
+      );
+    }
     changes.listed = input.listed;
   }
 
@@ -308,7 +414,8 @@ export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<Api
 /**
  * Prove the provider controls the upstream origin: it must serve
  * `zentrixpay-verification=<token>` at /.well-known/zentrixpay.txt.
- * On success the API is marked verified and listed.
+ * On success the API is marked verified, and listed once it is also
+ * registered on-chain.
  */
 export async function verifyOwnership(api: ApiRow): Promise<ApiRow> {
   let body: string;
@@ -342,7 +449,7 @@ export async function verifyOwnership(api: ApiRow): Promise<ApiRow> {
 
   const [row] = await db
     .update(apis)
-    .set({ ownershipVerifiedAt: new Date(), listed: true })
+    .set({ ownershipVerifiedAt: new Date(), listed: api.onchainStatus === "registered" })
     .where(eq(apis.id, api.id))
     .returning();
   invalidateApiCache(api.id);
@@ -359,6 +466,7 @@ export interface RecordCallInput {
   path: string;
   responseStatus: number;
   durationMs: number;
+  txHash?: string | null;
 }
 
 export async function recordApiCall(input: RecordCallInput): Promise<void> {
@@ -423,6 +531,9 @@ export async function getApiStats(apiId: string) {
       revenue: sql<string>`coalesce(sum(${apiCalls.amount}::numeric) filter (where ${apiCalls.charged}), 0)::text`,
       uniquePayers: sql<number>`count(distinct ${apiCalls.payerAddress}) filter (where ${apiCalls.charged})::int`,
       avgDurationMs: sql<number>`coalesce(avg(${apiCalls.durationMs}), 0)::int`,
+      refundedCalls: sql<number>`count(*) filter (where ${apiCalls.refundStatus} = 'refunded')::int`,
+      refunded: sql<string>`coalesce(sum(${apiCalls.refundAmount}::numeric) filter (where ${apiCalls.refundStatus} = 'refunded'), 0)::text`,
+      netRevenue: sql<string>`(coalesce(sum(${apiCalls.amount}::numeric) filter (where ${apiCalls.charged}), 0) - coalesce(sum(${apiCalls.refundAmount}::numeric) filter (where ${apiCalls.refundStatus} = 'refunded'), 0))::text`,
     })
     .from(apiCalls)
     .where(eq(apiCalls.apiId, apiId));
@@ -436,4 +547,50 @@ export async function listRecentCalls(apiId: string, limit: number) {
     .where(eq(apiCalls.apiId, apiId))
     .orderBy(desc(apiCalls.createdAt))
     .limit(limit);
+}
+
+/** One data point in a time-series response: calls and revenue for a single calendar day. */
+export interface TimeSeriesPoint {
+  date: string; // ISO date yyyy-mm-dd in UTC
+  calls: number;
+  revenue: string; // USDC, as decimal string
+}
+
+/**
+ * Returns one row per UTC calendar day, covering the last `days` days (today
+ * inclusive). Days with no calls are filled in with zeros so the caller always
+ * gets a contiguous series.
+ */
+export async function getApiTimeSeries(
+  apiId: string,
+  days: 7 | 30 | 90,
+): Promise<TimeSeriesPoint[]> {
+  const rows = await db
+    .select({
+      date: sql<string>`to_char(date_trunc('day', ${apiCalls.createdAt} at time zone 'UTC'), 'YYYY-MM-DD')`,
+      calls: sql<number>`count(*)::int`,
+      revenue: sql<string>`coalesce(sum(${apiCalls.amount}::numeric) filter (where ${apiCalls.charged}), 0)::text`,
+    })
+    .from(apiCalls)
+    .where(
+      and(
+        eq(apiCalls.apiId, apiId),
+        sql`${apiCalls.createdAt} >= now() - interval '${sql.raw(String(days))} days'`,
+      ),
+    )
+    .groupBy(sql`1`)
+    .orderBy(sql`1`);
+
+  // Build a map so we can fill in missing dates with zeros.
+  const byDate = new Map(rows.map((r) => [r.date, r]));
+
+  const result: TimeSeriesPoint[] = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
+    const dateStr = d.toISOString().slice(0, 10);
+    const row = byDate.get(dateStr);
+    result.push({ date: dateStr, calls: row?.calls ?? 0, revenue: row?.revenue ?? "0" });
+  }
+  return result;
 }

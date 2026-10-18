@@ -8,6 +8,7 @@ import {
   pgEnum,
   jsonb,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { createId } from "@paralleldrive/cuid2";
 
@@ -143,6 +144,13 @@ export const apis = pgTable(
     // API key. The value is AES-256-GCM encrypted (see utils/secretBox.ts).
     upstreamHeaderName: text("upstream_header_name"),
     upstreamHeaderValueEnc: text("upstream_header_value_enc"),
+    // Query parameter the proxy adds to every upstream URL, for APIs that take
+    // their key as ?api_key=…. Encrypted like the header value.
+    upstreamQueryName: text("upstream_query_name"),
+    upstreamQueryValueEnc: text("upstream_query_value_enc"),
+    // Provider-supplied OpenAPI 3 document, stored as uploaded (it may name the
+    // upstream; the public copy is rewritten, see services/openApiSpec.ts).
+    openapiSpec: jsonb("openapi_spec").$type<Record<string, unknown>>(),
     timeoutMs: integer("timeout_ms"),
     // Per-API response cap; never above PROXY_MAX_RESPONSE_BYTES (#37).
     maxResponseBytes: integer("max_response_bytes"),
@@ -160,11 +168,14 @@ export const apis = pgTable(
     ownershipVerifiedAt: timestamp("ownership_verified_at"),
     listed: boolean("listed").notNull().default(false),
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    // Soft delete: archived APIs are hidden everywhere but keep their call history.
+    archivedAt: timestamp("archived_at"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => ({
     publisherIdx: index("idx_apis_publisher_id").on(table.publisherId),
     catalogIdx: index("idx_apis_listed_created_at").on(table.listed, table.createdAt),
+    tagsIdx: index("idx_apis_tags").using("gin", table.tags),
   }),
 );
 
@@ -185,10 +196,16 @@ export const apiCalls = pgTable(
     path: text("path").notNull(),
     responseStatus: integer("response_status").notNull(),
     durationMs: integer("duration_ms").notNull(),
+    // Settlement transaction, from the x402 PAYMENT-RESPONSE header; null when not charged.
+    txHash: text("tx_hash"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => ({
+    refundTxIdx: uniqueIndex("idx_api_calls_refund_tx_hash").on(table.refundTxHash),
     apiCreatedIdx: index("idx_api_calls_api_id_created_at").on(table.apiId, table.createdAt),
-    payerIdx: index("idx_api_calls_payer_address").on(table.payerAddress),
+    payerCreatedIdx: index("idx_api_calls_payer_address_created_at").on(
+      table.payerAddress,
+      table.createdAt,
+    ),
   }),
 );

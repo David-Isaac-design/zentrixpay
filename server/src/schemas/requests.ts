@@ -144,24 +144,34 @@ const upstreamHeader = z
   })
   .strict();
 
-// Signed with HMAC-SHA256; the secret is shared with the provider's receiver.
-const webhook = z
+// Query parameter names the proxy may not overwrite with a provider secret.
+const upstreamQueryParam = z
   .object({
-    url: z.url(),
-    secret: z.string().min(16).max(256),
+    name: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9._~-]+$/, "query parameter name contains invalid characters"),
+    value: z
+      .string()
+      .min(1)
+      .max(4096)
+      .refine((v) => !/[\r\n\0]/.test(v), "query parameter value must not contain line breaks"),
   })
   .strict();
 
-// Pinged relative to the upstream URL, like a proxied call to /api/:id<healthPath>.
-const healthPath = z
-  .string()
-  .max(512)
-  .regex(/^\/[^\s#]*$/, "healthPath must start with / and contain no spaces or fragment");
-
-// The upper bound (PROXY_MAX_RESPONSE_BYTES) is enforced by the service.
-const maxResponseBytes = z.number().int().min(1024);
+// OpenAPI 3 document: JSON/YAML text or an already-parsed JSON object. Size and
+// structure are checked in services/openApiSpec.ts.
+const openapiSpec = z.union([z.string().min(1), z.record(z.string(), z.unknown())]);
 
 const tagList = z.array(z.string().trim().min(1).max(32).toLowerCase()).max(10);
+
+export const PAYER_LIST_MAX = 500;
+
+const payerList = z
+  .array(z.string().regex(/^G[A-Z2-7]{55}$/, "payer lists must hold Stellar public keys (G...)"))
+  .max(PAYER_LIST_MAX)
+  .transform((list) => [...new Set(list)]);
 
 export const createApiSchema = z
   .object({
@@ -172,11 +182,16 @@ export const createApiSchema = z
     walletAddress: stellarAddress.optional(),
     allowedMethods: z.array(z.enum(API_METHODS)).min(1).default(["GET"]),
     upstreamHeader: upstreamHeader.optional(),
+    upstreamQueryParam: upstreamQueryParam.optional(),
+    openapiSpec: openapiSpec.optional(),
     timeoutMs: z.number().int().min(1000).optional(),
     maxResponseBytes: maxResponseBytes.optional(),
     webhook: webhook.optional(),
     healthPath: healthPath.optional(),
     tags: tagList.default([]),
+    // Only these wallets may call the API; omit to allow everyone.
+    payerAllowlist: payerList.optional(),
+    payerDenylist: payerList.default([]),
   })
   .strict();
 
@@ -189,17 +204,32 @@ export const updateApiSchema = z
     walletAddress: stellarAddress.optional(),
     allowedMethods: z.array(z.enum(API_METHODS)).min(1).optional(),
     upstreamHeader: upstreamHeader.nullable().optional(),
+    upstreamQueryParam: upstreamQueryParam.nullable().optional(),
+    openapiSpec: openapiSpec.nullable().optional(),
     timeoutMs: z.number().int().min(1000).nullable().optional(),
     maxResponseBytes: maxResponseBytes.nullable().optional(),
     webhook: webhook.nullable().optional(),
     healthPath: healthPath.nullable().optional(),
     tags: tagList.optional(),
+    // null removes the allowlist, opening the API to every wallet again.
+    payerAllowlist: payerList.nullable().optional(),
+    payerDenylist: payerList.optional(),
     listed: z.boolean().optional(),
   })
   .strict();
 
+export const apiCatalogSortValues = ["newest", "price_asc", "price_desc", "popular"] as const;
+
 export const apiCatalogQuerySchema = z.object({
   q: z.string().trim().max(100).optional(),
+  // ?tag=a&tag=b — repeatable; an API must carry every requested tag.
+  tag: z
+    .preprocess(
+      (v) => (v === undefined ? undefined : Array.isArray(v) ? v : [v]),
+      z.array(z.string().trim().min(1).max(32).toLowerCase()).max(10),
+    )
+    .optional(),
+  sort: z.enum(apiCatalogSortValues).default("newest"),
   limit: z.coerce.number().int().min(1).max(CATALOG_MAX_LIMIT).default(CATALOG_DEFAULT_LIMIT),
   offset: z.coerce.number().int().min(0).default(0),
 });
