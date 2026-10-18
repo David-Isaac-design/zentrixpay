@@ -119,3 +119,8 @@ export async function getOnChainPrice(
   cache.set(resourceId, { price, creator: record.creator, fetchedAt: now() });
   return { price, creator: record.creator, cached: false };
 }
+
+/** Drop the cached on-chain price for one id, e.g. right after a confirmed set_price. */
+export function invalidateOnChainPrice(resourceId: string): void {
+  defaultCache.delete(resourceId);
+}

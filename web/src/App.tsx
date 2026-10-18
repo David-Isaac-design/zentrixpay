@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { ApiCatalog } from "./components/ApiCatalog.js";
 import { ProviderDashboard } from "./components/ProviderDashboard.js";
 import { TryItModal } from "./components/TryItModal.js";
+import { ApiDetailModal } from "./components/ApiDetailModal.js";
 import { Toast } from "./components/Toast.js";
 import { WalletButton } from "./components/WalletButton.js";
 import { useTheme } from "./hooks/useTheme.js";
@@ -18,6 +19,7 @@ const TABS: Array<{ id: Tab; label: string }> = [
 export default function App() {
   const [tab, setTab] = useState<Tab>("browse");
   const [trying, setTrying] = useState<PublicApi | null>(null);
+  const [viewing, setViewing] = useState<PublicApi | null>(null);
   const [toast, setToast] = useState<{ message: string; fallbackUrl?: string } | null>(null);
   const { theme, toggleTheme } = useTheme();
   const wallet = useWalletConnection();
@@ -84,13 +86,23 @@ export default function App() {
 
         <main id="main-content">
           {tab === "browse" ? (
-            <ApiCatalog onTry={setTrying} onCopy={copy} />
+            <ApiCatalog onTry={setTrying} onView={setViewing} onCopy={copy} />
           ) : (
             <ProviderDashboard wallet={wallet} onCopy={copy} />
           )}
         </main>
       </div>
 
+      {viewing && (
+        <ApiDetailModal
+          api={viewing}
+          onTry={(api) => {
+            setViewing(null);
+            setTrying(api);
+          }}
+          onClose={() => setViewing(null)}
+        />
+      )}
       {trying && <TryItModal api={trying} wallet={wallet} onClose={() => setTrying(null)} />}
       {toast && (
         <Toast

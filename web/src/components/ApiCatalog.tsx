@@ -5,10 +5,11 @@ import { ErrorBanner } from "./ErrorBanner.js";
 
 interface Props {
   onTry: (api: PublicApi) => void;
+  onView: (api: PublicApi) => void;
   onCopy: (text: string) => void;
 }
 
-export function ApiCatalog({ onTry, onCopy }: Props) {
+export function ApiCatalog({ onTry, onView, onCopy }: Props) {
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
 
@@ -64,7 +65,11 @@ export function ApiCatalog({ onTry, onCopy }: Props) {
               className="flex flex-col rounded-xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-700 dark:bg-gray-800"
             >
               <div className="mb-1 flex items-start justify-between gap-2">
-                <h3 className="font-semibold text-gray-900 dark:text-gray-100">{api.name}</h3>
+                <h3 className="font-semibold text-gray-900 dark:text-gray-100">
+                  <button onClick={() => onView(api)} className="text-left hover:underline">
+                    {api.name}
+                  </button>
+                </h3>
                 <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-0.5 text-sm font-semibold text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
                   {api.price} USDC
                   <span className="font-normal text-indigo-500 dark:text-indigo-400"> / call</span>
@@ -84,6 +89,14 @@ export function ApiCatalog({ onTry, onCopy }: Props) {
                     {m}
                   </span>
                 ))}
+                {api.onchain.registered && (
+                  <span
+                    title={`Price and payee anchored in registry ${api.onchain.contractId}`}
+                    className="rounded bg-indigo-50 px-1.5 py-0.5 text-xs text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300"
+                  >
+                    on-chain
+                  </span>
+                )}
                 {api.tags.map((tag) => (
                   <span
                     key={tag}
@@ -100,6 +113,14 @@ export function ApiCatalog({ onTry, onCopy }: Props) {
                 >
                   Try it
                 </button>
+                {api.openapiUrl && (
+                  <button
+                    onClick={() => onView(api)}
+                    className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
+                  >
+                    Endpoints
+                  </button>
+                )}
                 <button
                   onClick={() => onCopy(api.proxyUrl)}
                   className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"

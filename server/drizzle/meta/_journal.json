@@ -71,6 +71,13 @@
       "when": 1780300000000,
       "tag": "0009_api_proxy",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1780400000000,
+      "tag": "0010_api_gateway_extensions",
+      "breakpoints": true
     }
   ]
 }

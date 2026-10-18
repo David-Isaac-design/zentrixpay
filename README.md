@@ -27,8 +27,22 @@ caller ──same request + signed USDC payment─▶ ZentrixPay ──forward�
    - `upstreamUrl` — your real API's base URL. Callers never see it.
    - `allowedMethods` — e.g. `["GET", "POST"]`
    - `upstreamHeader` (optional) — a secret header ZentrixPay adds to every forwarded call, such as your own API key. It is stored AES-256-GCM encrypted.
-3. **Prove you own the domain** — serve the line you were given (`zentrixpay-verification=<token>`) at `https://<your-api-domain>/.well-known/zentrixpay.txt`, then `POST /apis/<id>/verify-ownership`. Your API is then listed.
-4. **Get paid** — share your proxy URL `https://<zentrixpay>/api/<id>`. `GET /apis/<id>/stats` shows calls, revenue, unique payers and latency.
+   - `upstreamQueryParam` (optional) — `{ "name": "api_key", "value": "…" }` for APIs that take their key in the URL. Stored encrypted, added to every forwarded URL (replacing any value the caller sent under that name), and stripped or redacted from `Location` and other response headers so it never reaches callers.
+   - `openapiSpec` (optional) — an OpenAPI 3 document (JSON or YAML text, or a JSON object; up to 512 KB). The catalog shows its endpoints, and `GET /apis/<id>/openapi.json` serves it with every `servers` URL pointed at your proxy URL and your upstream origin scrubbed. Send `null` in a `PATCH` to remove it.
+3. **Prove you own the domain** — serve the line you were given (`zentrixpay-verification=<token>`) at `https://<your-api-domain>/.well-known/zentrixpay.txt`, then `POST /apis/<id>/verify-ownership`.
+4. **Anchor it on-chain** — `GET /apis/<id>/register/prepare` returns an unsigned vault-registry `register` transaction (id = the API id, creator = your payout wallet, price in USDC base units). Sign it with your payout wallet and `POST /apis/<id>/register` with `{ "signedXdr": "…" }`. Once ownership is verified and the registration is confirmed, the API is listed.
+5. **Get paid** — share your proxy URL `https://<zentrixpay>/api/<id>`. `GET /apis/<id>/stats` shows calls, revenue, refunds, net revenue, unique payers and latency.
+
+Every paid call checks the database price and payout wallet against the on-chain record first. If they differ, the call is refused with `409` before the caller is asked to pay. That is why a registered API's price changes only through the registry: `POST /apis/<id>/price/prepare` with `{ "price": "…" }`, sign the returned `set_price` transaction, then `POST /apis/<id>/price` with `{ "price", "signedXdr" }`. A registered API's payout wallet cannot be changed.
+
+### Refunds
+
+A provider can refund any charged call from `GET /apis/<id>/stats` → `recentCalls`. ZentrixPay never holds funds, so the refund is a USDC transfer from your payout wallet back to the caller, and you sign it:
+
+1. `POST /apis/<id>/calls/<callId>/refund/prepare` returns an unsigned USDC `transfer(payout wallet → payer, call amount)` transaction.
+2. Sign it and `POST /apis/<id>/calls/<callId>/refund` with `{ "signedXdr": "…" }`.
+
+The server checks that the signed transaction is exactly the prepared transfer, claims the call so it cannot be refunded twice, submits it, and records `refundStatus`, `refundAmount`, `refundTxHash` and `refundedAt` on the call. Stats then report `refunded`, `refundedCalls` and `netRevenue` (revenue minus refunds). The contract's `record_creator_refund` is not used: it needs an on-chain payment receipt, and API calls do not record one.
 
 > **Lock your upstream down.** ZentrixPay never reveals your upstream URL, but if your API answers requests without the secret header, anyone who finds the URL can skip paying. Require the header you configured in `upstreamHeader`.
 
@@ -36,17 +50,24 @@ All of this is also available in the web app (**Sell your API** tab) and through
 
 ### API reference
 
-| Endpoint                          | Auth        | Description                                                     |
-| --------------------------------- | ----------- | --------------------------------------------------------------- |
-| `GET /apis?q=&limit=&offset=`     | —           | Catalog of listed APIs                                          |
-| `GET /apis/:id`                   | —           | One listed API: price, methods, payee, proxy URL                |
-| `ANY /api/:id/*`                  | x402        | A paid call, forwarded to the provider                          |
-| `POST /publishers`                | —           | Register as a provider; returns your API key once               |
-| `POST /apis`                      | `x-api-key` | Register an API                                                 |
-| `PATCH /apis/:id`                 | `x-api-key` | Change price, upstream, methods, secret header, tags or listing |
-| `POST /apis/:id/verify-ownership` | `x-api-key` | Check `/.well-known/zentrixpay.txt` and list the API            |
-| `GET /publishers/me/apis`         | `x-api-key` | Your APIs, listed or not                                        |
-| `GET /apis/:id/stats`             | `x-api-key` | Call counts, USDC revenue, unique payers, recent calls          |
+| Endpoint                                      | Auth        | Description                                                     |
+| --------------------------------------------- | ----------- | --------------------------------------------------------------- |
+| `GET /apis?q=&limit=&offset=`                 | —           | Catalog of listed APIs                                          |
+| `GET /apis/:id`                               | —           | One listed API: price, methods, payee, proxy URL                |
+| `ANY /api/:id/*`                              | x402        | A paid call, forwarded to the provider                          |
+| `POST /publishers`                            | —           | Register as a provider; returns your API key once               |
+| `POST /apis`                                  | `x-api-key` | Register an API                                                 |
+| `GET /apis/:id/openapi.json`                  | —           | The API's OpenAPI document, pointed at the proxy                |
+| `PATCH /apis/:id`                             | `x-api-key` | Change price, upstream, methods, secrets, spec, tags or listing |
+| `POST /apis/:id/verify-ownership`             | `x-api-key` | Check `/.well-known/zentrixpay.txt`                             |
+| `GET /apis/:id/register/prepare`              | `x-api-key` | Unsigned registry `register` transaction                        |
+| `POST /apis/:id/register`                     | `x-api-key` | Submit the signed registration; lists a verified API            |
+| `POST /apis/:id/price/prepare`                | `x-api-key` | Unsigned `set_price` transaction for a registered API           |
+| `POST /apis/:id/price`                        | `x-api-key` | Submit the signed `set_price` and update the price              |
+| `POST /apis/:id/calls/:callId/refund/prepare` | `x-api-key` | Unsigned USDC refund transfer to the payer                      |
+| `POST /apis/:id/calls/:callId/refund`         | `x-api-key` | Submit the signed refund and record it                          |
+| `GET /publishers/me/apis`                     | `x-api-key` | Your APIs, listed or not                                        |
+| `GET /apis/:id/stats`                         | `x-api-key` | Call counts, revenue, refunds, net revenue, recent calls        |
 
 Changing an API's upstream to a different domain un-lists it until ownership is verified again.
 

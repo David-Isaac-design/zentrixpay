@@ -8,6 +8,7 @@ import {
   pgEnum,
   jsonb,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { createId } from "@paralleldrive/cuid2";
 
@@ -143,11 +144,22 @@ export const apis = pgTable(
     // API key. The value is AES-256-GCM encrypted (see utils/secretBox.ts).
     upstreamHeaderName: text("upstream_header_name"),
     upstreamHeaderValueEnc: text("upstream_header_value_enc"),
+    // Query parameter the proxy adds to every upstream URL, for APIs that take
+    // their key as ?api_key=…. Encrypted like the header value.
+    upstreamQueryName: text("upstream_query_name"),
+    upstreamQueryValueEnc: text("upstream_query_value_enc"),
+    // Provider-supplied OpenAPI 3 document, stored as uploaded (it may name the
+    // upstream; the public copy is rewritten, see services/openApiSpec.ts).
+    openapiSpec: jsonb("openapi_spec").$type<Record<string, unknown>>(),
     timeoutMs: integer("timeout_ms"),
     ownershipToken: text("ownership_token").notNull(),
     ownershipVerifiedAt: timestamp("ownership_verified_at"),
     listed: boolean("listed").notNull().default(false),
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    // Registration in the vault registry, which anchors price and payee so
+    // callers can check them on-chain. Listing requires "registered".
+    onchainStatus: onchainStatusEnum("onchain_status").notNull().default("none"),
+    onchainTxHash: text("onchain_tx_hash"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => ({
@@ -173,9 +185,16 @@ export const apiCalls = pgTable(
     path: text("path").notNull(),
     responseStatus: integer("response_status").notNull(),
     durationMs: integer("duration_ms").notNull(),
+    // Provider-initiated refund: "pending" while the USDC transfer back to the
+    // payer is being submitted, "refunded" once it confirmed.
+    refundStatus: text("refund_status").$type<"pending" | "refunded">(),
+    refundAmount: text("refund_amount"),
+    refundTxHash: text("refund_tx_hash"),
+    refundedAt: timestamp("refunded_at"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => ({
+    refundTxIdx: uniqueIndex("idx_api_calls_refund_tx_hash").on(table.refundTxHash),
     apiCreatedIdx: index("idx_api_calls_api_id_created_at").on(table.apiId, table.createdAt),
     payerIdx: index("idx_api_calls_payer_address").on(table.payerAddress),
   }),

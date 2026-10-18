@@ -4,15 +4,23 @@ import {
   createApi,
   fetchApiStats,
   fetchMyApis,
+  prepareApiPrice,
+  prepareApiRegistration,
+  prepareCallRefund,
   registerPublisher,
+  submitApiPrice,
+  submitApiRegistration,
+  submitCallRefund,
   updateApi,
   verifyApiOwnership,
+  type ApiCall,
   type ApiStats,
   type HttpMethod,
   type OwnerApi,
 } from "../api/apis.js";
 import { useAsync } from "../hooks/useAsync.js";
 import type { WalletState } from "../hooks/useWalletConnection.js";
+import { signWithWallet } from "../lib/signXdr.js";
 import { ErrorBanner } from "./ErrorBanner.js";
 
 const KEY_STORAGE = "zentrixpay-provider-api-key";
@@ -66,6 +74,16 @@ function Field({
       {hint && <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{hint}</p>}
     </div>
   );
+}
+
+// Matches the server's limit (services/openApiSpec.ts).
+const MAX_OPENAPI_BYTES = 512 * 1024;
+
+async function readSpecFile(file: File): Promise<string> {
+  if (file.size > MAX_OPENAPI_BYTES) {
+    throw new Error(`OpenAPI document must be at most ${MAX_OPENAPI_BYTES / 1024} KB`);
+  }
+  return file.text();
 }
 
 // ── Getting an API key ───────────────────────────────────────────────────────
@@ -202,6 +220,9 @@ function NewApiForm({ apiKey, onCreated }: { apiKey: string; onCreated: () => vo
   const [methods, setMethods] = useState<HttpMethod[]>(["GET"]);
   const [headerName, setHeaderName] = useState("");
   const [headerValue, setHeaderValue] = useState("");
+  const [queryName, setQueryName] = useState("");
+  const [queryValue, setQueryValue] = useState("");
+  const [spec, setSpec] = useState<string | null>(null);
   const [tags, setTags] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -223,6 +244,9 @@ function NewApiForm({ apiKey, onCreated }: { apiKey: string; onCreated: () => vo
         allowedMethods: methods,
         upstreamHeader:
           headerName && headerValue ? { name: headerName, value: headerValue } : undefined,
+        upstreamQueryParam:
+          queryName && queryValue ? { name: queryName, value: queryValue } : undefined,
+        openapiSpec: spec ?? undefined,
         tags: tags
           .split(",")
           .map((t) => t.trim())
@@ -332,6 +356,56 @@ function NewApiForm({ apiKey, onCreated }: { apiKey: string; onCreated: () => vo
           />
         </Field>
       </div>
+      <div className="grid gap-x-4 md:grid-cols-2">
+        <Field
+          label="Secret query parameter (optional)"
+          htmlFor="api-qname"
+          hint="For APIs that take their key in the URL, e.g. api_key."
+        >
+          <input
+            id="api-qname"
+            placeholder="api_key"
+            value={queryName}
+            onChange={(e) => setQueryName(e.target.value)}
+            className={`${inputClass} font-mono`}
+          />
+        </Field>
+        <Field
+          label="Secret query value"
+          htmlFor="api-qvalue"
+          hint="Stored encrypted; never shown to callers."
+        >
+          <input
+            id="api-qvalue"
+            type="password"
+            value={queryValue}
+            onChange={(e) => setQueryValue(e.target.value)}
+            className={`${inputClass} font-mono`}
+          />
+        </Field>
+      </div>
+      <Field
+        label="OpenAPI document (optional)"
+        htmlFor="api-spec"
+        hint="OpenAPI 3 JSON or YAML, up to 512 KB. Callers see the endpoints; never your upstream URL."
+      >
+        <input
+          id="api-spec"
+          type="file"
+          accept=".json,.yaml,.yml,application/json,application/yaml,text/yaml"
+          onChange={async (e) => {
+            const file = e.target.files?.[0];
+            setError(null);
+            try {
+              setSpec(file ? await readSpecFile(file) : null);
+            } catch (err) {
+              setSpec(null);
+              setError(err instanceof Error ? err.message : "Could not read the file");
+            }
+          }}
+          className="text-sm text-gray-700 dark:text-gray-200"
+        />
+      </Field>
       <Field label="Tags" htmlFor="api-tags" hint="Comma separated, up to 10.">
         <input
           id="api-tags"
@@ -355,9 +429,18 @@ function NewApiForm({ apiKey, onCreated }: { apiKey: string; onCreated: () => vo
 
 // ── Managing one API ─────────────────────────────────────────────────────────
 
-function StatsPanel({ stats }: { stats: ApiStats }) {
+function StatsPanel({
+  stats,
+  onRefund,
+  refunding,
+}: {
+  stats: ApiStats;
+  onRefund: (call: ApiCall) => void;
+  refunding: string | null;
+}) {
   const tiles = [
-    ["Revenue", `${stats.revenue} USDC`],
+    ["Net revenue", `${stats.netRevenue} USDC`],
+    ["Refunded", `${stats.refunded} USDC (${stats.refundedCalls})`],
     ["Paid calls", String(stats.chargedCalls)],
     ["All calls", String(stats.calls)],
     ["Unique payers", String(stats.uniquePayers)],
@@ -365,7 +448,7 @@ function StatsPanel({ stats }: { stats: ApiStats }) {
   ];
   return (
     <div className="mt-4">
-      <dl className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
+      <dl className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
         {tiles.map(([label, value]) => (
           <div key={label} className="rounded-lg bg-gray-50 p-2 dark:bg-gray-900">
             <dt className="text-xs text-gray-500 dark:text-gray-400">{label}</dt>
@@ -382,7 +465,8 @@ function StatsPanel({ stats }: { stats: ApiStats }) {
                 <th className="py-1 pr-3">Call</th>
                 <th className="py-1 pr-3">Status</th>
                 <th className="py-1 pr-3">Paid</th>
-                <th className="py-1">Payer</th>
+                <th className="py-1 pr-3">Payer</th>
+                <th className="py-1">Refund</th>
               </tr>
             </thead>
             <tbody className="text-gray-700 dark:text-gray-200">
@@ -396,8 +480,25 @@ function StatsPanel({ stats }: { stats: ApiStats }) {
                   </td>
                   <td className="py-1 pr-3 font-mono">{c.responseStatus}</td>
                   <td className="py-1 pr-3">{c.charged ? `${c.amount} USDC` : "—"}</td>
-                  <td className="py-1 font-mono">
+                  <td className="py-1 pr-3 font-mono">
                     {c.payerAddress.slice(0, 6)}…{c.payerAddress.slice(-4)}
+                  </td>
+                  <td className="py-1">
+                    {c.refundStatus === "refunded" ? (
+                      <span title={c.refundTxHash ?? undefined}>Refunded</span>
+                    ) : c.refundStatus === "pending" ? (
+                      "Pending…"
+                    ) : c.charged && c.payerAddress !== "unknown" ? (
+                      <button
+                        className="text-indigo-600 underline disabled:opacity-60 dark:text-indigo-400"
+                        disabled={refunding !== null}
+                        onClick={() => onRefund(c)}
+                      >
+                        {refunding === c.id ? "Refunding…" : "Refund"}
+                      </button>
+                    ) : (
+                      "—"
+                    )}
                   </td>
                 </tr>
               ))}
@@ -424,6 +525,37 @@ function ApiCard({
   const [error, setError] = useState<string | null>(null);
   const [price, setPrice] = useState(api.price);
   const [stats, setStats] = useState<ApiStats | null>(null);
+  const [refunding, setRefunding] = useState<string | null>(null);
+  const registered = api.onchainStatus === "registered";
+
+  async function refund(call: ApiCall) {
+    setRefunding(call.id);
+    setError(null);
+    try {
+      const { unsignedXdr, networkPassphrase } = await prepareCallRefund(apiKey, api.id, call.id);
+      const signedXdr = await signWithWallet(unsignedXdr, networkPassphrase);
+      await submitCallRefund(apiKey, api.id, call.id, signedXdr);
+      setStats(await fetchApiStats(apiKey, api.id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Refund failed");
+    } finally {
+      setRefunding(null);
+    }
+  }
+
+  async function registerOnChain(): Promise<OwnerApi> {
+    const { unsignedXdr, networkPassphrase } = await prepareApiRegistration(apiKey, api.id);
+    const signedXdr = await signWithWallet(unsignedXdr, networkPassphrase);
+    return submitApiRegistration(apiKey, api.id, signedXdr);
+  }
+
+  async function savePrice(): Promise<OwnerApi> {
+    if (!registered) return updateApi(apiKey, api.id, { price });
+    // Anchored prices change on-chain first, signed by the payout wallet.
+    const { unsignedXdr, networkPassphrase } = await prepareApiPrice(apiKey, api.id, price);
+    const signedXdr = await signWithWallet(unsignedXdr, networkPassphrase);
+    return submitApiPrice(apiKey, api.id, price, signedXdr);
+  }
 
   async function run(label: string, action: () => Promise<OwnerApi | void>) {
     setBusy(label);
@@ -452,6 +584,17 @@ function ApiCard({
             Ownership not verified
           </span>
         )}
+        <span
+          className={`rounded-full px-2 py-0.5 text-xs ${registered ? "bg-indigo-100 text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-300" : "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"}`}
+        >
+          {registered
+            ? "On-chain"
+            : api.onchainStatus === "pending"
+              ? "On-chain registration pending"
+              : api.onchainStatus === "failed"
+                ? "On-chain registration failed"
+                : "Not on-chain"}
+        </span>
       </div>
 
       <dl className="mb-3 grid gap-1 text-sm">
@@ -487,6 +630,53 @@ function ApiCard({
             </dd>
           </div>
         )}
+        {api.upstreamQueryParamName && (
+          <div className="flex flex-wrap gap-2">
+            <dt className="text-gray-500 dark:text-gray-400">Secret query</dt>
+            <dd className="font-mono text-gray-800 dark:text-gray-100">
+              ?{api.upstreamQueryParamName}=••••••
+            </dd>
+          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <dt className="text-gray-500 dark:text-gray-400">OpenAPI</dt>
+          <dd className="flex flex-wrap items-center gap-2 text-gray-800 dark:text-gray-100">
+            {api.openapiUrl ? (
+              <span className="font-mono break-all">{api.openapiUrl}</span>
+            ) : (
+              <span className="text-gray-500 dark:text-gray-400">none</span>
+            )}
+            <label className="cursor-pointer text-xs text-indigo-600 underline dark:text-indigo-400">
+              {api.openapiUrl ? "replace" : "upload"}
+              <input
+                type="file"
+                className="sr-only"
+                accept=".json,.yaml,.yml,application/json,application/yaml,text/yaml"
+                disabled={busy !== null}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (file) {
+                    run("OpenAPI", async () =>
+                      updateApi(apiKey, api.id, { openapiSpec: await readSpecFile(file) }),
+                    );
+                  }
+                }}
+              />
+            </label>
+            {api.openapiUrl && (
+              <button
+                className="text-xs text-indigo-600 underline dark:text-indigo-400"
+                disabled={busy !== null}
+                onClick={() =>
+                  run("OpenAPI", () => updateApi(apiKey, api.id, { openapiSpec: null }))
+                }
+              >
+                remove
+              </button>
+            )}
+          </dd>
+        </div>
       </dl>
 
       {!api.ownershipVerified && (
@@ -502,6 +692,26 @@ function ApiCard({
             onClick={() => run("Verify", () => verifyApiOwnership(apiKey, api.id))}
           >
             {busy === "Verify" ? "Checking…" : "Verify ownership"}
+          </button>
+        </div>
+      )}
+
+      {!registered && (
+        <div className="mb-3 rounded-lg bg-indigo-50 p-3 text-sm text-indigo-900 dark:bg-indigo-900/20 dark:text-indigo-200">
+          <p className="mb-2">
+            Listed APIs anchor their price and payout wallet in the on-chain registry so callers can
+            verify them. Sign the registration with your payout wallet (
+            <span className="font-mono">
+              {api.walletAddress.slice(0, 6)}…{api.walletAddress.slice(-4)}
+            </span>
+            ) in Freighter.
+          </p>
+          <button
+            className={secondaryButton}
+            disabled={busy !== null || api.onchainStatus === "pending"}
+            onClick={() => run("Register", registerOnChain)}
+          >
+            {busy === "Register" ? "Registering…" : "Register on-chain"}
           </button>
         </div>
       )}
@@ -525,11 +735,11 @@ function ApiCard({
         <button
           className={secondaryButton}
           disabled={busy !== null || price === api.price}
-          onClick={() => run("Save price", () => updateApi(apiKey, api.id, { price }))}
+          onClick={() => run("Save price", savePrice)}
         >
-          {busy === "Save price" ? "Saving…" : "Save price"}
+          {busy === "Save price" ? "Saving…" : registered ? "Sign & save price" : "Save price"}
         </button>
-        {api.ownershipVerified && (
+        {api.ownershipVerified && registered && (
           <button
             className={secondaryButton}
             disabled={busy !== null}
@@ -558,7 +768,7 @@ function ApiCard({
           {error}
         </p>
       )}
-      {stats && <StatsPanel stats={stats} />}
+      {stats && <StatsPanel stats={stats} onRefund={refund} refunding={refunding} />}
     </li>
   );
 }

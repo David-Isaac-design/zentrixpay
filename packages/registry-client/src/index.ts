@@ -126,3 +126,35 @@ export async function listResources(
   const tx = await (client as any).list({ start, limit });
   return tx.result as Resource[];
 }
+
+/** USDC on Stellar has 7 decimals; the registry stores prices as i128 base units. */
+export const USDC_DECIMALS = 7;
+
+/**
+ * Convert a decimal USDC string ("0.05") to registry base units (500000n)
+ * without going through floating point. Rejects more than 7 decimals.
+ */
+export function usdcToBaseUnits(usdc: string): bigint {
+  const match = /^(\d+)(?:\.(\d{1,7}))?$/.exec(usdc.trim());
+  if (!match) throw new Error(`Invalid USDC amount: ${usdc}`);
+  const [, whole, frac = ""] = match;
+  return BigInt(whole) * 10n ** BigInt(USDC_DECIMALS) + BigInt(frac.padEnd(USDC_DECIMALS, "0"));
+}
+
+/** What the registry's `metadata` field holds for a pay-per-call API listing. */
+export interface ApiListingMetadata {
+  kind: "api";
+  name: string;
+  proxyUrl: string;
+}
+
+/** Serialize the metadata stored on-chain when an API is registered. */
+export function apiListingMetadata(input: { name: string; proxyUrl: string }): string {
+  // The contract caps metadata at 512 bytes; names are cut well short of that.
+  const metadata: ApiListingMetadata = {
+    kind: "api",
+    name: input.name.slice(0, 100),
+    proxyUrl: input.proxyUrl,
+  };
+  return JSON.stringify(metadata);
+}

@@ -71,9 +71,6 @@ importers:
 
   mcp:
     dependencies:
-      '@zentrixpay/registry-client':
-        specifier: workspace:*
-        version: link:../packages/registry-client
       '@modelcontextprotocol/sdk':
         specifier: ^1.12.1
         version: 1.29.0(zod@4.4.3)
@@ -86,6 +83,9 @@ importers:
       '@x402/stellar':
         specifier: ^2.9.0
         version: 2.16.0
+      '@zentrixpay/registry-client':
+        specifier: workspace:*
+        version: link:../packages/registry-client
       node-fetch:
         specifier: ^3.3.2
         version: 3.3.2
@@ -127,9 +127,6 @@ importers:
 
   server:
     dependencies:
-      '@zentrixpay/registry-client':
-        specifier: workspace:*
-        version: link:../packages/registry-client
       '@opentelemetry/api':
         specifier: ^1.9.0
         version: 1.9.1
@@ -178,6 +175,9 @@ importers:
       '@x402/stellar':
         specifier: ^2.9.0
         version: 2.16.0
+      '@zentrixpay/registry-client':
+        specifier: workspace:*
+        version: link:../packages/registry-client
       compression:
         specifier: ^1.8.1
         version: 1.8.1
@@ -223,6 +223,9 @@ importers:
       x402-stellar:
         specifier: ^0.2.0
         version: 0.2.0(@stellar/stellar-sdk@15.1.0)
+      yaml:
+        specifier: ^2.8.1
+        version: 2.9.0
       zod:
         specifier: ^4.3.6
         version: 4.4.3
@@ -260,9 +263,6 @@ importers:
 
   web:
     dependencies:
-      '@zentrixpay/registry-client':
-        specifier: workspace:*
-        version: link:../packages/registry-client
       '@sentry/react':
         specifier: ^10.62.0
         version: 10.62.0(react@18.3.1)
@@ -278,6 +278,9 @@ importers:
       '@x402/stellar':
         specifier: ^2.9.0
         version: 2.16.0
+      '@zentrixpay/registry-client':
+        specifier: workspace:*
+        version: link:../packages/registry-client
       i18next:
         specifier: ^26.3.3
         version: 26.3.3(typescript@5.9.3)
