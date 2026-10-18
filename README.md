@@ -1,60 +1,53 @@
 # Project
 
-A full-stack application with a Postgres database and a mock upstream service for local development.
+## Getting started
 
-## Prerequisites
+### Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) and Docker Compose
-- [Node.js](https://nodejs.org/) (LTS)
-- [pnpm](https://pnpm.io/)
+- **Node.js** (v18 or newer recommended)
 
-## Local Development Quickstart
+This project uses [pnpm](https://pnpm.io/) as its package manager. You do **not** need to install pnpm globally — the recommended way is to enable it through Node's built-in [Corepack](https://nodejs.org/api/corepack.html):
 
-Get a fresh clone to a running stack in under five commands:
-
-```bash
-git clone <repository-url> && cd <repository-name>   # 1. Clone and enter the repo
-pnpm install                                          # 2. Install dependencies
-docker compose up -d                                  # 3. Start Postgres and the mock upstream
-pnpm db:migrate                                       # 4. Apply database migrations
-pnpm dev                                              # 5. Start the dev servers
+```sh
+corepack enable
 ```
 
-That's it — the app should now be running locally.
+Once Corepack is enabled, `pnpm` will be available on your `PATH` and will automatically use the version pinned in the project's `package.json` (`packageManager` field).
 
-### What each command does
+### Installing dependencies
 
-1. **Clone and enter the repo** — grabs the source and moves into the project directory.
-2. **`pnpm install`** — installs all workspace dependencies.
-3. **`docker compose up -d`** — starts the services defined in [`docker-compose.yml`](./docker-compose.yml):
-   - **Postgres** — the local database, exposed on the default port (`5432`).
-   - **Mock upstream** — a lightweight stand-in for the external upstream service, so you can develop and test without hitting real third-party endpoints.
-4. **`pnpm db:migrate`** — runs the database migrations against the Postgres container.
-5. **`pnpm dev`** — starts the application dev servers with hot reload.
-
-### Stopping and cleaning up
-
-```bash
-docker compose down          # Stop the containers (keeps data)
-docker compose down -v       # Stop the containers and remove volumes (wipes data)
+```sh
+pnpm install
 ```
 
-## Configuration
+## Git hooks
 
-The default environment variables are set up to work with the Docker Compose services out of the box. If you need to customize ports, credentials, or the mock upstream URL, copy the example env file and adjust as needed:
+This repository uses [Husky](https://typicode.github.io/husky/) to run Git hooks (for example, `pre-commit` and `commit-msg`). These hooks invoke `pnpm exec` to run tooling such as linters and commit-message checks.
 
-```bash
-cp .env.example .env
-```
+If `pnpm` is not available on your `PATH`, the hooks will fall back to running pnpm via `npx pnpm@<version>` (using the version pinned in `package.json`). This means commits will still work on a machine that only has Node.js installed, as long as `npx` can download the pinned pnpm version.
 
-See [`docker-compose.yml`](./docker-compose.yml) for the full list of services and their exposed ports.
+If neither `pnpm` nor `npx` is available, the hooks will fail with a clear message explaining how to fix the setup. To resolve it, either:
 
-## Scripts
+1. Enable Corepack (recommended):
 
-| Script            | Description                                  |
-| ----------------- | -------------------------------------------- |
-| `pnpm dev`        | Start the dev servers with hot reload        |
-| `pnpm build`      | Build the application for production         |
-| `pnpm db:migrate` | Apply database migrations                    |
-| `pnpm test`       | Run the test suite                           |
-| `pnpm lint`       | Lint the codebase                            |
+   ```sh
+   corepack enable
+   ```
+
+2. Or install pnpm globally:
+
+   ```sh
+   npm install -g pnpm
+   ```
+
+After enabling Corepack or installing pnpm, re-run `pnpm install` so the hooks are set up correctly.
+
+## Contributing
+
+1. Fork and clone the repository.
+2. Enable Corepack (`corepack enable`) or install pnpm globally.
+3. Run `pnpm install`.
+4. Create a branch, make your changes, and commit. The Git hooks will run automatically.
+5. Open a pull request.
+
+If you run into issues with the Git hooks, make sure `pnpm` (or `npx`) is available on your `PATH` and that you have run `pnpm install` after cloning.
