@@ -152,6 +152,18 @@ export const apis = pgTable(
     // upstream; the public copy is rewritten, see services/openApiSpec.ts).
     openapiSpec: jsonb("openapi_spec").$type<Record<string, unknown>>(),
     timeoutMs: integer("timeout_ms"),
+    // Per-API response cap; never above PROXY_MAX_RESPONSE_BYTES (#37).
+    maxResponseBytes: integer("max_response_bytes"),
+    // Signed event POSTed after each charged call (#36). The secret is
+    // AES-256-GCM encrypted like the upstream header value.
+    webhookUrl: text("webhook_url"),
+    webhookSecretEnc: text("webhook_secret_enc"),
+    // Upstream health (#35): healthPath is pinged relative to upstreamUrl;
+    // unhealthy APIs are hidden from the catalog until a check succeeds.
+    healthPath: text("health_path"),
+    healthy: boolean("healthy").notNull().default(true),
+    healthFailures: integer("health_failures").notNull().default(0),
+    lastHealthCheckAt: timestamp("last_health_check_at"),
     ownershipToken: text("ownership_token").notNull(),
     ownershipVerifiedAt: timestamp("ownership_verified_at"),
     listed: boolean("listed").notNull().default(false),

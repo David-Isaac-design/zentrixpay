@@ -10,6 +10,19 @@ import type { apiCatalogSortValues } from "../schemas/requests.js";
 
 export type ApiRow = typeof apis.$inferSelect;
 
+// Hot proxied APIs are looked up on every call (#34). Every write to an API
+// goes through this module and invalidates its entry, so edits apply at once
+// in this process; other replicas see them within the TTL.
+const apiCache = createTtlCache<ApiRow>({
+  defaultTtlMs: config.PROXY_API_CACHE_TTL_MS,
+  maxSize: 1_000,
+  cacheName: "proxied_api",
+});
+
+export function invalidateApiCache(id: string): void {
+  apiCache.delete(id);
+}
+
 export const OWNERSHIP_FILE_PATH = "/.well-known/zentrixpay.txt";
 
 export class ApiServiceError extends Error {
@@ -138,6 +151,27 @@ function clampTimeout(timeoutMs: number | undefined | null): number | null | und
   return Math.min(timeoutMs, config.PROXY_MAX_TIMEOUT_MS);
 }
 
+function checkedMaxResponseBytes(bytes: number | undefined | null): number | null | undefined {
+  if (bytes !== undefined && bytes !== null && bytes > config.PROXY_MAX_RESPONSE_BYTES) {
+    throw new ApiServiceError(
+      400,
+      `maxResponseBytes must not exceed the server limit of ${config.PROXY_MAX_RESPONSE_BYTES} bytes`,
+    );
+  }
+  return bytes;
+}
+
+/** The response cap applied to a proxied call; the global cap always wins. */
+export function effectiveMaxResponseBytes(api: ApiRow): number {
+  return Math.min(
+    api.maxResponseBytes ?? config.PROXY_MAX_RESPONSE_BYTES,
+    config.PROXY_MAX_RESPONSE_BYTES,
+  );
+}
+
+// A new health target starts out healthy until checks say otherwise.
+const RESET_HEALTH = { healthy: true, healthFailures: 0, lastHealthCheckAt: null };
+
 export interface CreateApiInput {
   publisherId: string;
   name: string;
@@ -150,6 +184,9 @@ export interface CreateApiInput {
   upstreamQueryParam?: { name: string; value: string };
   openapiSpec?: string | Record<string, unknown>;
   timeoutMs?: number;
+  maxResponseBytes?: number;
+  webhook?: { url: string; secret: string };
+  healthPath?: string;
   tags: string[];
   payerAllowlist?: string[];
   payerDenylist?: string[];
@@ -167,6 +204,8 @@ export async function createApi(input: CreateApiInput): Promise<ApiRow> {
       walletAddress: input.walletAddress,
       allowedMethods: input.allowedMethods,
       timeoutMs: clampTimeout(input.timeoutMs),
+      maxResponseBytes: checkedMaxResponseBytes(input.maxResponseBytes),
+      healthPath: input.healthPath,
       tags: input.tags,
       payerAllowlist: input.payerAllowlist ?? null,
       payerDenylist: input.payerDenylist ?? [],
@@ -187,6 +226,15 @@ export async function getApiById(
   const rows = await db.select().from(apis).where(eq(apis.id, id));
   const api = rows[0] ?? null;
   if (api?.archivedAt && !opts.includeArchived) return null;
+  return api;
+}
+
+/** getApiById behind a short TTL cache, for the per-call proxy path (#34). */
+export async function getProxiedApi(id: string): Promise<ApiRow | null> {
+  const cached = apiCache.get(id);
+  if (cached) return cached;
+  const api = await getApiById(id);
+  if (api) apiCache.set(id, api);
   return api;
 }
 
@@ -281,6 +329,9 @@ export interface UpdateApiInput {
   upstreamQueryParam?: { name: string; value: string } | null;
   openapiSpec?: string | Record<string, unknown> | null;
   timeoutMs?: number | null;
+  maxResponseBytes?: number | null;
+  webhook?: { url: string; secret: string } | null;
+  healthPath?: string | null;
   tags?: string[];
   payerAllowlist?: string[] | null;
   payerDenylist?: string[];
@@ -312,6 +363,7 @@ export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<Api
     walletAddress: input.walletAddress,
     allowedMethods: input.allowedMethods,
     timeoutMs: clampTimeout(input.timeoutMs),
+    maxResponseBytes: checkedMaxResponseBytes(input.maxResponseBytes),
     tags: input.tags,
     payerAllowlist: input.payerAllowlist,
     payerDenylist: input.payerDenylist,
@@ -319,9 +371,14 @@ export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<Api
     ...encryptedQueryParam(input.upstreamQueryParam),
   };
 
+  if (input.healthPath !== undefined && input.healthPath !== api.healthPath) {
+    Object.assign(changes, { healthPath: input.healthPath }, RESET_HEALTH);
+  }
+
   if (input.upstreamUrl !== undefined) {
     const upstreamUrl = checkedUpstreamUrl(input.upstreamUrl);
     changes.upstreamUrl = upstreamUrl;
+    if (upstreamUrl !== api.upstreamUrl) Object.assign(changes, RESET_HEALTH);
     // Ownership was proven for the old origin; a new origin must be proven again.
     if (new URL(upstreamUrl).origin !== new URL(api.upstreamUrl).origin) {
       changes.ownershipVerifiedAt = null;
@@ -350,6 +407,7 @@ export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<Api
   if (Object.keys(changes).length === 0) return api;
 
   const [row] = await db.update(apis).set(changes).where(eq(apis.id, api.id)).returning();
+  invalidateApiCache(api.id);
   return row;
 }
 
@@ -394,10 +452,12 @@ export async function verifyOwnership(api: ApiRow): Promise<ApiRow> {
     .set({ ownershipVerifiedAt: new Date(), listed: api.onchainStatus === "registered" })
     .where(eq(apis.id, api.id))
     .returning();
+  invalidateApiCache(api.id);
   return row;
 }
 
 export interface RecordCallInput {
+  id?: string;
   apiId: string;
   payerAddress: string;
   amount: string;
@@ -411,6 +471,56 @@ export interface RecordCallInput {
 
 export async function recordApiCall(input: RecordCallInput): Promise<void> {
   await db.insert(apiCalls).values(input);
+}
+
+// ── Health checks (#35) ──────────────────────────────────────────────────────
+
+/** Listed APIs with a health path, healthy or not (unhealthy ones must be able to recover). */
+export async function listApisForHealthCheck(): Promise<ApiRow[]> {
+  return db
+    .select()
+    .from(apis)
+    .where(and(eq(apis.listed, true), isNotNull(apis.healthPath)));
+}
+
+/** Map an API's healthPath onto its upstream, the same way the proxy maps /api/:id<path>. */
+export function healthCheckUrl(api: ApiRow): URL {
+  const base = new URL(api.upstreamUrl);
+  const raw = api.healthPath ?? "/";
+  const queryStart = raw.indexOf("?");
+  const path = queryStart === -1 ? raw : raw.slice(0, queryStart);
+  const query = queryStart === -1 ? "" : raw.slice(queryStart + 1);
+  const target = new URL(base.origin);
+  target.pathname = `${base.pathname.replace(/\/+$/, "")}${path}`;
+  target.search = [base.search.slice(1), query].filter(Boolean).join("&");
+  return target;
+}
+
+/**
+ * Record one health check. A success makes the API healthy at once; it turns
+ * unhealthy only after `failureThreshold` consecutive failures.
+ */
+export async function recordHealthCheck(
+  api: ApiRow,
+  ok: boolean,
+  failureThreshold: number,
+): Promise<ApiRow> {
+  const now = new Date();
+  const [row] = await db
+    .update(apis)
+    .set(
+      ok
+        ? { healthy: true, healthFailures: 0, lastHealthCheckAt: now }
+        : {
+            healthFailures: sql`${apis.healthFailures} + 1`,
+            healthy: sql`case when ${apis.healthFailures} + 1 >= ${failureThreshold} then false else ${apis.healthy} end`,
+            lastHealthCheckAt: now,
+          },
+    )
+    .where(eq(apis.id, api.id))
+    .returning();
+  if (row && row.healthy !== api.healthy) invalidateApiCache(api.id);
+  return row ?? api;
 }
 
 export async function getApiStats(apiId: string) {

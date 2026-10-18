@@ -185,6 +185,9 @@ export const createApiSchema = z
     upstreamQueryParam: upstreamQueryParam.optional(),
     openapiSpec: openapiSpec.optional(),
     timeoutMs: z.number().int().min(1000).optional(),
+    maxResponseBytes: maxResponseBytes.optional(),
+    webhook: webhook.optional(),
+    healthPath: healthPath.optional(),
     tags: tagList.default([]),
     // Only these wallets may call the API; omit to allow everyone.
     payerAllowlist: payerList.optional(),
@@ -204,6 +207,9 @@ export const updateApiSchema = z
     upstreamQueryParam: upstreamQueryParam.nullable().optional(),
     openapiSpec: openapiSpec.nullable().optional(),
     timeoutMs: z.number().int().min(1000).nullable().optional(),
+    maxResponseBytes: maxResponseBytes.nullable().optional(),
+    webhook: webhook.nullable().optional(),
+    healthPath: healthPath.nullable().optional(),
     tags: tagList.optional(),
     // null removes the allowlist, opening the API to every wallet again.
     payerAllowlist: payerList.nullable().optional(),

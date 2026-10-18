@@ -15,6 +15,8 @@ export interface PublicApi {
   walletAddress: string;
   allowedMethods: HttpMethod[];
   tags: string[];
+  /** False while health checks say the upstream is down; hidden from the catalog. */
+  healthy: boolean;
   proxyUrl: string;
   /** Present when the provider uploaded an OpenAPI document. */
   openapiUrl: string | null;
@@ -31,6 +33,12 @@ export interface OwnerApi extends PublicApi {
   upstreamQueryParamName: string | null;
   hasUpstreamQuerySecret: boolean;
   timeoutMs: number | null;
+  /** Per-API response cap in bytes; null means the server-wide limit. */
+  maxResponseBytes: number | null;
+  webhookUrl: string | null;
+  hasWebhookSecret: boolean;
+  healthPath: string | null;
+  health: { healthy: boolean; consecutiveFailures: number; lastCheckedAt: string | null };
   listed: boolean;
   onchainStatus: "none" | "pending" | "registered" | "failed";
   ownershipVerified: boolean;
@@ -79,6 +87,9 @@ export interface ApiInput {
   /** OpenAPI 3 document as JSON/YAML text; null removes it. */
   openapiSpec?: string | null;
   timeoutMs?: number | null;
+  maxResponseBytes?: number | null;
+  webhook?: { url: string; secret: string } | null;
+  healthPath?: string | null;
   tags?: string[];
   listed?: boolean;
 }

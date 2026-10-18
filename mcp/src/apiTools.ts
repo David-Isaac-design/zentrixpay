@@ -182,7 +182,7 @@ export const API_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "zentrixpay_update_api",
     description:
-      "Update one of your APIs: price, upstream, methods, secret header, tags, or listing (listed: false hides it from the catalog and stops calls). Pass removeUpstreamHeader: true to delete the secret header.",
+      "Update one of your APIs: price, upstream, methods, secret header, limits, health path, webhook, tags, or listing (listed: false hides it from the catalog and stops calls). Pass removeUpstreamHeader, removeWebhook or removeHealthPath: true to clear those settings.",
     inputSchema: {
       type: "object",
       properties: {
@@ -191,6 +191,11 @@ export const API_TOOL_DEFINITIONS: ToolDefinition[] = [
         removeUpstreamHeader: {
           type: "boolean",
           description: "Delete the stored secret header.",
+        },
+        removeWebhook: { type: "boolean", description: "Stop sending webhooks for this API." },
+        removeHealthPath: {
+          type: "boolean",
+          description: "Turn off health checks (the API is treated as healthy).",
         },
         listed: { type: "boolean", description: "List or unlist the API." },
         confirmMainnet: CONFIRM_MAINNET,

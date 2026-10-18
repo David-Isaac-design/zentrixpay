@@ -23,6 +23,7 @@ import {
   ApiServiceError,
   archiveApi,
   createApi,
+  effectiveMaxResponseBytes,
   getApiById,
   getApiStats,
   getApiTimeSeries,
@@ -531,6 +532,19 @@ async function proxyHandler(req: Request, res: Response) {
         target.pathname.slice(new URL(api.upstreamUrl).pathname.replace(/\/+$/, "").length) || "/",
       responseStatus: res.statusCode,
       durationMs: Date.now() - started,
+    };
+    const charged = res.statusCode < 400;
+    if (charged) deliverChargedCallWebhook(api, { ...call, amount: api.price });
+    recordApiCall({
+      id: call.callId,
+      apiId: api.id,
+      payerAddress: call.payerAddress,
+      amount: api.price,
+      charged,
+      method: call.method,
+      path: call.path,
+      responseStatus: call.responseStatus,
+      durationMs: call.durationMs,
     }).catch((err) =>
       getLogger().error(
         { event: "api_call_record_failed", apiId: api.id, err },
@@ -547,7 +561,7 @@ async function proxyHandler(req: Request, res: Response) {
       headers,
       body,
       timeoutMs: api.timeoutMs ?? config.PROXY_DEFAULT_TIMEOUT_MS,
-      maxResponseBytes: config.PROXY_MAX_RESPONSE_BYTES,
+      maxResponseBytes: effectiveMaxResponseBytes(api),
       allowPrivate: config.PROXY_ALLOW_PRIVATE_UPSTREAMS,
     });
   } catch (err) {

@@ -35,6 +35,7 @@ const weather: PublicApi = {
   walletAddress: "GPROVIDER",
   allowedMethods: ["GET", "POST"],
   tags: ["weather"],
+  healthy: true,
   proxyUrl: "http://gw.test/api/api1",
   createdAt: "2026-10-01T00:00:00Z",
 };
@@ -45,6 +46,11 @@ const owned: OwnerApi = {
   upstreamHeaderName: null,
   hasUpstreamSecret: false,
   timeoutMs: null,
+  maxResponseBytes: null,
+  webhookUrl: null,
+  hasWebhookSecret: false,
+  healthPath: null,
+  health: { healthy: true, consecutiveFailures: 0, lastCheckedAt: null },
   listed: false,
   ownershipVerified: false,
   ownershipVerification: {
