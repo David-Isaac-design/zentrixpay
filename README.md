@@ -1,111 +1,53 @@
-# API Monetization Platform
+# Project
 
-A platform for API providers to monetize their APIs and for consumers to discover and pay for API access.
-
-## Overview
-
-This platform enables:
-- **API Providers** to register their APIs, set pricing, and earn revenue from API calls
-- **API Consumers** to discover, subscribe to, and pay for API access
-- **Automated billing** with usage tracking and payment processing
-
-## Getting Started
+## Getting started
 
 ### Prerequisites
 
-- Node.js 18+
-- PostgreSQL 14+
-- Redis 6+
+- **Node.js** (v18 or newer recommended)
 
-### Installation
+This project uses [pnpm](https://pnpm.io/) as its package manager. You do **not** need to install pnpm globally — the recommended way is to enable it through Node's built-in [Corepack](https://nodejs.org/api/corepack.html):
 
-```bash
-# Clone the repository
-git clone https://github.com/your-org/api-monetization-platform.git
-cd api-monetization-platform
-
-# Install dependencies
-npm install
-
-# Set up environment variables
-cp .env.example .env
-# Edit .env with your configuration
-
-# Run database migrations
-npm run migrate
-
-# Start the development server
-npm run dev
+```sh
+corepack enable
 ```
 
-## For API providers
+Once Corepack is enabled, `pnpm` will be available on your `PATH` and will automatically use the version pinned in the project's `package.json` (`packageManager` field).
 
-Register your API, configure pricing, and start earning from every call. For a step-by-step testnet walkthrough from registration to your first paid call, see [docs/provider-quickstart.md](docs/provider-quickstart.md).
+### Installing dependencies
 
-### Registering an API
-
-1. Create a provider account
-2. Add your API endpoint and documentation
-3. Configure pricing tiers
-4. Set up your payment details
-
-### Pricing Models
-
-- **Pay-per-call**: Charge a fixed amount per API request
-- **Tiered pricing**: Volume-based discounts for high-usage consumers
-- **Subscription**: Recurring monthly fees for unlimited access
-
-## For API consumers
-
-### Discovering APIs
-
-Browse the marketplace to find APIs that match your needs. Each listing includes:
-- API documentation
-- Pricing information
-- Usage examples
-- Provider reputation scores
-
-### Making API Calls
-
-```bash
-curl -H "Authorization: Bearer YOUR_API_KEY" \
-     https://api.platform.com/v1/proxy/your-api-endpoint
+```sh
+pnpm install
 ```
 
-## Architecture
+## Git hooks
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Provider  │────▶│   Platform  │◀────│  Consumer   │
-│     API     │     │   Gateway   │     │    App      │
-└─────────────┘     └─────────────┘     └─────────────┘
-                           │
-                    ┌──────┴──────┐
-                    │   Billing   │
-                    │   Engine    │
-                    └─────────────┘
-```
+This repository uses [Husky](https://typicode.github.io/husky/) to run Git hooks (for example, `pre-commit` and `commit-msg`). These hooks invoke `pnpm exec` to run tooling such as linters and commit-message checks.
 
-## Development
+If `pnpm` is not available on your `PATH`, the hooks will fall back to running pnpm via `npx pnpm@<version>` (using the version pinned in `package.json`). This means commits will still work on a machine that only has Node.js installed, as long as `npx` can download the pinned pnpm version.
 
-### Running Tests
+If neither `pnpm` nor `npx` is available, the hooks will fail with a clear message explaining how to fix the setup. To resolve it, either:
 
-```bash
-npm test
-```
+1. Enable Corepack (recommended):
 
-### Code Style
+   ```sh
+   corepack enable
+   ```
 
-This project uses ESLint and Prettier. Run the linter with:
+2. Or install pnpm globally:
 
-```bash
-npm run lint
-```
+   ```sh
+   npm install -g pnpm
+   ```
+
+After enabling Corepack or installing pnpm, re-run `pnpm install` so the hooks are set up correctly.
 
 ## Contributing
 
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
+1. Fork and clone the repository.
+2. Enable Corepack (`corepack enable`) or install pnpm globally.
+3. Run `pnpm install`.
+4. Create a branch, make your changes, and commit. The Git hooks will run automatically.
+5. Open a pull request.
 
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+If you run into issues with the Git hooks, make sure `pnpm` (or `npx`) is available on your `PATH` and that you have run `pnpm install` after cloning.
