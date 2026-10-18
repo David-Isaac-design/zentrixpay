@@ -145,6 +145,11 @@ export const API_TOOL_DEFINITIONS: ToolDefinition[] = [
           description:
             "Per-call maximum automatic payment in USDC. Required when the price is above ZENTRIXPAY_MAX_AUTO_PAY_USDC.",
         },
+        dryRun: {
+          type: "boolean",
+          description:
+            "When true, resolve the request (URL, method, price) and return a preview without making any paid call or spending USDC.",
+        },
         confirmPaid: CONFIRM_PAID,
         confirmMainnet: CONFIRM_MAINNET,
       },
@@ -348,6 +353,22 @@ function str(args: Record<string, unknown>, key: string, required = false): stri
         `${api.name} does not accept ${method}; allowed: ${api.allowedMethods.join(", ")}`,
       );
     }
+
+    const path = (str(args, "path") ?? "").replace(/^\/+/, "");
+    const url = new URL(`${api.proxyUrl}${path ? `/${path}` : ""}`);
+    for (const [k, v] of Object.entries(stringMap(args, "query"))) url.searchParams.append(k, v);
+
+    // Dry-run: return the resolved request details and price without paying.
+    if (args.dryRun === true) {
+      return json({
+        dryRun: true,
+        api: { id: api.id, name: api.name },
+        request: { method, url: url.toString() },
+        price: `${api.price} USDC`,
+        note: "No payment was made. Pass dryRun: false (or omit it) to execute the call.",
+      });
+    }
+
     deps.assertWithinCeiling(api.price, str(args, "maxAutoPayUsdc"));
     assertWithinSessionSpendLimit({ price: api.price });
 
