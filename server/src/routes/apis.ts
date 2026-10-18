@@ -8,6 +8,7 @@ import { apiPaywall, loadProxiedApi } from "../middleware/apiPaywall.js";
 import { apiCatalogQuerySchema, createApiSchema, updateApiSchema } from "../schemas/requests.js";
 import {
   ApiServiceError,
+  archiveApi,
   createApi,
   getApiById,
   getApiStats,
@@ -127,6 +128,17 @@ router.patch(
   },
 );
 
+// DELETE /apis/:id — archive (soft-delete): unlist and hide the API, keep its call history (owner)
+router.delete("/apis/:id", apiKeyAuth, requestSignatureAuth, async (req, res) => {
+  try {
+    const api = await getOwnedApi(req.params.id as string, req.publisher!.id);
+    const archived = await archiveApi(api);
+    res.json({ id: archived.id, archived: true, archivedAt: archived.archivedAt });
+  } catch (err) {
+    sendServiceError(res, err);
+  }
+});
+
 // POST /apis/:id/verify-ownership — check /.well-known/zentrixpay.txt, then list (owner)
 router.post("/apis/:id/verify-ownership", apiKeyAuth, requestSignatureAuth, async (req, res) => {
   try {
@@ -137,15 +149,17 @@ router.post("/apis/:id/verify-ownership", apiKeyAuth, requestSignatureAuth, asyn
   }
 });
 
-// GET /apis/:id/stats — call counts, revenue and recent calls (owner)
+// GET /apis/:id/stats — call counts, revenue and recent calls (owner; archived APIs included)
 router.get("/apis/:id/stats", apiKeyAuth, async (req, res) => {
   try {
-    const api = await getOwnedApi(req.params.id as string, req.publisher!.id);
+    const api = await getOwnedApi(req.params.id as string, req.publisher!.id, {
+      includeArchived: true,
+    });
     const [totals, recentCalls] = await Promise.all([
       getApiStats(api.id),
       listRecentCalls(api.id, 50),
     ]);
-    res.json({ apiId: api.id, ...totals, recentCalls });
+    res.json({ apiId: api.id, archivedAt: api.archivedAt, ...totals, recentCalls });
   } catch (err) {
     sendServiceError(res, err);
   }

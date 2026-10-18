@@ -76,6 +76,23 @@ export function ApiCatalog({ onTry, onCopy }: Props) {
     setError(null);
   }
 
+  useEffect(() => {
+    if (!data) return;
+    setKnownTags((prev) => {
+      const next = new Set(prev);
+      for (const api of data) for (const tag of api.tags) next.add(tag);
+      return next.size === prev.length ? prev : [...next].sort();
+    });
+  }, [data]);
+
+  function toggleTag(tag: string) {
+    setSelectedTags((prev) =>
+      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag].sort(),
+    );
+  }
+
+  const filtering = Boolean(debounced) || selectedTags.length > 0;
+
   return (
     <section aria-labelledby="catalog-heading">
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -91,6 +108,38 @@ export function ApiCatalog({ onTry, onCopy }: Props) {
           className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 sm:w-72"
         />
       </div>
+
+      {knownTags.length > 0 && (
+        <div
+          className="mb-4 flex flex-wrap items-center gap-1.5"
+          role="group"
+          aria-label="Filter by tag"
+        >
+          {knownTags.map((tag) => {
+            const on = selectedTags.includes(tag);
+            return (
+              <button
+                key={tag}
+                type="button"
+                aria-pressed={on}
+                onClick={() => toggleTag(tag)}
+                className={`${chipBase} ${on ? chipOn : chipOff}`}
+              >
+                #{tag}
+              </button>
+            );
+          })}
+          {selectedTags.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setSelectedTags([])}
+              className="ml-1 text-xs text-gray-500 underline hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+            >
+              Clear tags
+            </button>
+          )}
+        </div>
+      )}
 
       {status === "error" && (
         <ErrorBanner message={error ?? t("catalog.heading")} onRetry={retry} />

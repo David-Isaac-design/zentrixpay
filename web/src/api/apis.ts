@@ -165,6 +165,11 @@ export async function verifyApiOwnership(apiKey: string, id: string): Promise<Ow
   );
 }
 
+/** Archive (soft-delete) an API: it disappears from the catalog and dashboard; stats remain. */
+export async function archiveApi(apiKey: string, id: string): Promise<void> {
+  await readJson(await signedPublisherFetch(absolute(`/apis/${id}`), apiKey, { method: "DELETE" }));
+}
+
 export async function fetchApiStats(apiKey: string, id: string): Promise<ApiStats> {
   return readJson(await signedPublisherFetch(absolute(`/apis/${id}/stats`), apiKey));
 }

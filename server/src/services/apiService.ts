@@ -1,11 +1,12 @@
 import { randomBytes } from "node:crypto";
-import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { apiCalls, apis } from "../db/schema.js";
 import { config } from "../config.js";
 import { encryptSecret } from "../utils/secretBox.js";
 import { validateUpstreamUrl } from "../lib/upstreamGuard.js";
 import { sendUpstream } from "../lib/upstreamClient.js";
+import type { apiCatalogSortValues } from "../schemas/requests.js";
 
 export type ApiRow = typeof apis.$inferSelect;
 
@@ -124,29 +125,73 @@ export async function createApi(input: CreateApiInput): Promise<ApiRow> {
   return row;
 }
 
-export async function getApiById(id: string): Promise<ApiRow | null> {
+/** Load an API by id. Archived APIs are treated as missing unless `includeArchived` is set. */
+export async function getApiById(
+  id: string,
+  opts: { includeArchived?: boolean } = {},
+): Promise<ApiRow | null> {
   const rows = await db.select().from(apis).where(eq(apis.id, id));
-  return rows[0] ?? null;
+  const api = rows[0] ?? null;
+  if (api?.archivedAt && !opts.includeArchived) return null;
+  return api;
 }
 
 /** Load an API and require that `publisherId` owns it (404 otherwise, to avoid leaking ids). */
-export async function getOwnedApi(id: string, publisherId: string): Promise<ApiRow> {
-  const api = await getApiById(id);
+export async function getOwnedApi(
+  id: string,
+  publisherId: string,
+  opts: { includeArchived?: boolean } = {},
+): Promise<ApiRow> {
+  const api = await getApiById(id, opts);
   if (!api || api.publisherId !== publisherId) throw new ApiServiceError(404, "API not found");
   return api;
 }
 
-export async function listPublicApis(opts: { q?: string; limit: number; offset: number }) {
-  const conditions = [eq(apis.listed, true)];
+export type ApiCatalogSort = (typeof apiCatalogSortValues)[number];
+
+export interface ApiCatalogOptions {
+  q?: string;
+  tag?: string[];
+  sort?: ApiCatalogSort;
+  limit: number;
+  offset: number;
+}
+
+/** Window used to rank APIs by popularity (charged calls). */
+export const POPULARITY_WINDOW_DAYS = 7;
+
+export async function listPublicApis(opts: ApiCatalogOptions) {
+  const conditions = [eq(apis.listed, true), isNull(apis.archivedAt)];
   if (opts.q) {
     const pattern = `%${opts.q.replace(/[%_\\]/g, "\\$&")}%`;
     conditions.push(or(ilike(apis.name, pattern), ilike(apis.description, pattern))!);
   }
+  if (opts.tag?.length) {
+    // jsonb containment: the API's tags must include every requested tag.
+    conditions.push(sql`${apis.tags} @> ${JSON.stringify(opts.tag)}::jsonb`);
+  }
+
+  // Charged calls in the popularity window; correlated so it only runs for this sort.
+  const recentChargedCalls = sql`(
+    select count(*) from ${apiCalls}
+    where ${apiCalls.apiId} = ${apis.id}
+      and ${apiCalls.charged}
+      and ${apiCalls.createdAt} >= now() - make_interval(days => ${POPULARITY_WINDOW_DAYS})
+  )`;
+  const price = sql`${apis.price}::numeric`;
+  const order = {
+    newest: [desc(apis.createdAt)],
+    price_asc: [asc(price), desc(apis.createdAt)],
+    price_desc: [desc(price), desc(apis.createdAt)],
+    popular: [desc(recentChargedCalls), desc(apis.createdAt)],
+  }[opts.sort ?? "newest"];
+
   const rows = await db
     .select()
     .from(apis)
     .where(and(...conditions))
-    .orderBy(desc(apis.createdAt))
+    // id breaks ties so offset pagination is stable.
+    .orderBy(...order, asc(apis.id))
     .limit(opts.limit)
     .offset(opts.offset);
   return rows.map(toPublicApi);
@@ -156,9 +201,19 @@ export async function listPublisherApis(publisherId: string) {
   const rows = await db
     .select()
     .from(apis)
-    .where(eq(apis.publisherId, publisherId))
+    .where(and(eq(apis.publisherId, publisherId), isNull(apis.archivedAt)))
     .orderBy(desc(apis.createdAt));
   return rows.map(toOwnerApi);
+}
+
+/** Soft-delete: unlist and hide the API everywhere. Its call history is kept for stats. */
+export async function archiveApi(api: ApiRow): Promise<ApiRow> {
+  const [row] = await db
+    .update(apis)
+    .set({ archivedAt: new Date(), listed: false })
+    .where(eq(apis.id, api.id))
+    .returning();
+  return row;
 }
 
 export interface UpdateApiInput {
