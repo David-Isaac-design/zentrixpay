@@ -10,6 +10,7 @@ interface Props {
 }
 
 export function ApiCatalog({ onTry, onCopy }: Props) {
+  const { t } = useTranslation();
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
   const [items, setItems] = useState<PublicApi[]>([]);
@@ -79,20 +80,20 @@ export function ApiCatalog({ onTry, onCopy }: Props) {
     <section aria-labelledby="catalog-heading">
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h2 id="catalog-heading" className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-          APIs you can call
+          {t("catalog.heading")}
         </h2>
         <input
           type="search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search APIs…"
-          aria-label="Search APIs"
+          placeholder={t("catalog.search_placeholder")}
+          aria-label={t("catalog.search_label")}
           className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 sm:w-72"
         />
       </div>
 
       {status === "error" && (
-        <ErrorBanner message={error ?? "Failed to load APIs"} onRetry={retry} />
+        <ErrorBanner message={error ?? t("catalog.heading")} onRetry={retry} />
       )}
 
       {status === "loading" && items.length === 0 && (

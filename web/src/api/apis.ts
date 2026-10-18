@@ -112,6 +112,11 @@ export async function fetchApis(
   return readJson(await fetch(url, { signal }));
 }
 
+export async function fetchApiById(id: string, signal?: AbortSignal): Promise<PublicApi> {
+  const url = new URL(`${API_BASE}/apis/${encodeURIComponent(id)}`, window.location.origin);
+  return readJson(await fetch(url, { signal }));
+}
+
 export async function registerPublisher(input: {
   name: string;
   email: string;
