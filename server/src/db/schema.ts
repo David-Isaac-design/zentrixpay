@@ -8,6 +8,7 @@ import {
   pgEnum,
   jsonb,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { createId } from "@paralleldrive/cuid2";
 
@@ -143,6 +144,13 @@ export const apis = pgTable(
     // API key. The value is AES-256-GCM encrypted (see utils/secretBox.ts).
     upstreamHeaderName: text("upstream_header_name"),
     upstreamHeaderValueEnc: text("upstream_header_value_enc"),
+    // Query parameter the proxy adds to every upstream URL, for APIs that take
+    // their key as ?api_key=…. Encrypted like the header value.
+    upstreamQueryName: text("upstream_query_name"),
+    upstreamQueryValueEnc: text("upstream_query_value_enc"),
+    // Provider-supplied OpenAPI 3 document, stored as uploaded (it may name the
+    // upstream; the public copy is rewritten, see services/openApiSpec.ts).
+    openapiSpec: jsonb("openapi_spec").$type<Record<string, unknown>>(),
     timeoutMs: integer("timeout_ms"),
     ownershipToken: text("ownership_token").notNull(),
     ownershipVerifiedAt: timestamp("ownership_verified_at"),
@@ -181,6 +189,7 @@ export const apiCalls = pgTable(
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => ({
+    refundTxIdx: uniqueIndex("idx_api_calls_refund_tx_hash").on(table.refundTxHash),
     apiCreatedIdx: index("idx_api_calls_api_id_created_at").on(table.apiId, table.createdAt),
     payerCreatedIdx: index("idx_api_calls_payer_address_created_at").on(
       table.payerAddress,

@@ -16,6 +16,10 @@ export interface PublicApi {
   allowedMethods: HttpMethod[];
   tags: string[];
   proxyUrl: string;
+  /** Present when the provider uploaded an OpenAPI document. */
+  openapiUrl: string | null;
+  /** The API's record in the vault registry, so callers can check price and payee. */
+  onchain: { registered: boolean; contractId: string; txHash: string | null };
   createdAt: string;
 }
 
@@ -24,8 +28,11 @@ export interface OwnerApi extends PublicApi {
   upstreamUrl: string;
   upstreamHeaderName: string | null;
   hasUpstreamSecret: boolean;
+  upstreamQueryParamName: string | null;
+  hasUpstreamQuerySecret: boolean;
   timeoutMs: number | null;
   listed: boolean;
+  onchainStatus: "none" | "pending" | "registered" | "failed";
   ownershipVerified: boolean;
   ownershipVerification: { url: string; expectedContent: string };
 }
@@ -39,6 +46,10 @@ export interface ApiCall {
   path: string;
   responseStatus: number;
   durationMs: number;
+  refundStatus: "pending" | "refunded" | null;
+  refundAmount: string | null;
+  refundTxHash: string | null;
+  refundedAt: string | null;
   createdAt: string;
 }
 
@@ -49,6 +60,9 @@ export interface ApiStats {
   revenue: string;
   uniquePayers: number;
   avgDurationMs: number;
+  refundedCalls: number;
+  refunded: string;
+  netRevenue: string;
   currency: "USDC";
   recentCalls: ApiCall[];
 }
@@ -61,6 +75,9 @@ export interface ApiInput {
   walletAddress?: string;
   allowedMethods?: HttpMethod[];
   upstreamHeader?: { name: string; value: string } | null;
+  upstreamQueryParam?: { name: string; value: string } | null;
+  /** OpenAPI 3 document as JSON/YAML text; null removes it. */
+  openapiSpec?: string | null;
   timeoutMs?: number | null;
   tags?: string[];
   listed?: boolean;

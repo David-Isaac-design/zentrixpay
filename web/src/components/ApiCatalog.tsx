@@ -6,6 +6,7 @@ const PAGE_SIZE = 20;
 
 interface Props {
   onTry: (api: PublicApi) => void;
+  onView: (api: PublicApi) => void;
   onCopy: (text: string) => void;
 }
 

@@ -32,9 +32,26 @@ export function toPublicApi(api: ApiRow) {
     walletAddress: api.walletAddress,
     allowedMethods: api.allowedMethods,
     tags: api.tags,
-    proxyUrl: `${config.BASE_URL}/api/${api.id}`,
+    proxyUrl: proxyUrlOf(api),
+    openapiUrl: api.openapiSpec ? `${config.BASE_URL}/apis/${api.id}/openapi.json` : null,
+    // Where callers can check price and payee for themselves.
+    onchain: {
+      registered: api.onchainStatus === "registered",
+      contractId: config.REGISTRY_CONTRACT_ID,
+      txHash: api.onchainTxHash,
+    },
     createdAt: api.createdAt,
   };
+}
+
+function proxyUrlOf(api: ApiRow): string {
+  return `${config.BASE_URL}/api/${api.id}`;
+}
+
+/** The API's OpenAPI document as callers see it, or null if it has none. */
+export function toPublicOpenApi(api: ApiRow) {
+  if (!api.openapiSpec) return null;
+  return publicOpenApiSpec(api.openapiSpec, api.upstreamUrl, proxyUrlOf(api));
 }
 
 /** What the owning provider sees. Includes the upstream URL but never the secret value. */
@@ -44,10 +61,13 @@ export function toOwnerApi(api: ApiRow) {
     upstreamUrl: api.upstreamUrl,
     upstreamHeaderName: api.upstreamHeaderName,
     hasUpstreamSecret: Boolean(api.upstreamHeaderValueEnc),
+    upstreamQueryParamName: api.upstreamQueryName,
+    hasUpstreamQuerySecret: Boolean(api.upstreamQueryValueEnc),
     timeoutMs: api.timeoutMs,
     payerAllowlist: api.payerAllowlist,
     payerDenylist: api.payerDenylist,
     listed: api.listed,
+    onchainStatus: api.onchainStatus,
     ownershipVerified: Boolean(api.ownershipVerifiedAt),
     ownershipVerification: {
       url: ownershipFileUrl(api.upstreamUrl),
@@ -74,19 +94,43 @@ function checkedUpstreamUrl(raw: string): string {
   }
 }
 
-function encryptedHeader(header: { name: string; value: string } | null | undefined) {
-  if (header === undefined) return {};
-  if (header === null) return { upstreamHeaderName: null, upstreamHeaderValueEnc: null };
+function secretKey(): string {
   if (!config.UPSTREAM_SECRET_KEY) {
     throw new ApiServiceError(
       503,
       "This server cannot store upstream secrets (UPSTREAM_SECRET_KEY is not configured)",
     );
   }
+  return config.UPSTREAM_SECRET_KEY;
+}
+
+function encryptedHeader(header: { name: string; value: string } | null | undefined) {
+  if (header === undefined) return {};
+  if (header === null) return { upstreamHeaderName: null, upstreamHeaderValueEnc: null };
   return {
     upstreamHeaderName: header.name.toLowerCase(),
-    upstreamHeaderValueEnc: encryptSecret(header.value, config.UPSTREAM_SECRET_KEY),
+    upstreamHeaderValueEnc: encryptSecret(header.value, secretKey()),
   };
+}
+
+function encryptedQueryParam(param: { name: string; value: string } | null | undefined) {
+  if (param === undefined) return {};
+  if (param === null) return { upstreamQueryName: null, upstreamQueryValueEnc: null };
+  // Query parameter names are case-sensitive, so the name is kept as given.
+  return {
+    upstreamQueryName: param.name,
+    upstreamQueryValueEnc: encryptSecret(param.value, secretKey()),
+  };
+}
+
+function checkedOpenApiSpec(spec: string | Record<string, unknown> | null | undefined) {
+  if (spec === undefined || spec === null) return spec;
+  try {
+    return parseOpenApiSpec(spec);
+  } catch (err) {
+    if (err instanceof OpenApiSpecError) throw new ApiServiceError(400, err.message);
+    throw err;
+  }
 }
 
 function clampTimeout(timeoutMs: number | undefined | null): number | null | undefined {
@@ -103,6 +147,8 @@ export interface CreateApiInput {
   walletAddress: string;
   allowedMethods: string[];
   upstreamHeader?: { name: string; value: string };
+  upstreamQueryParam?: { name: string; value: string };
+  openapiSpec?: string | Record<string, unknown>;
   timeoutMs?: number;
   tags: string[];
   payerAllowlist?: string[];
@@ -125,7 +171,9 @@ export async function createApi(input: CreateApiInput): Promise<ApiRow> {
       payerAllowlist: input.payerAllowlist ?? null,
       payerDenylist: input.payerDenylist ?? [],
       ownershipToken: randomBytes(16).toString("hex"),
+      openapiSpec: checkedOpenApiSpec(input.openapiSpec),
       ...encryptedHeader(input.upstreamHeader),
+      ...encryptedQueryParam(input.upstreamQueryParam),
     })
     .returning();
   return row;
@@ -230,6 +278,8 @@ export interface UpdateApiInput {
   walletAddress?: string;
   allowedMethods?: string[];
   upstreamHeader?: { name: string; value: string } | null;
+  upstreamQueryParam?: { name: string; value: string } | null;
+  openapiSpec?: string | Record<string, unknown> | null;
   timeoutMs?: number | null;
   tags?: string[];
   payerAllowlist?: string[] | null;
@@ -238,6 +288,23 @@ export interface UpdateApiInput {
 }
 
 export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<ApiRow> {
+  // Once anchored on-chain, price and payee change only through the registry
+  // so the on-chain record never drifts from what callers are charged.
+  if (api.onchainStatus === "registered" || api.onchainStatus === "pending") {
+    if (input.price !== undefined && input.price !== api.price) {
+      throw new ApiServiceError(
+        409,
+        `This API's price is anchored on-chain; change it with POST /apis/${api.id}/price/prepare`,
+      );
+    }
+    if (input.walletAddress !== undefined && input.walletAddress !== api.walletAddress) {
+      throw new ApiServiceError(
+        409,
+        "The payout wallet of an API registered on-chain cannot change",
+      );
+    }
+  }
+
   const changes: Partial<typeof apis.$inferInsert> = {
     name: input.name,
     description: input.description,
@@ -249,6 +316,7 @@ export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<Api
     payerAllowlist: input.payerAllowlist,
     payerDenylist: input.payerDenylist,
     ...encryptedHeader(input.upstreamHeader),
+    ...encryptedQueryParam(input.upstreamQueryParam),
   };
 
   if (input.upstreamUrl !== undefined) {
@@ -267,6 +335,12 @@ export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<Api
     if (input.listed && !verified) {
       throw new ApiServiceError(409, "Verify ownership of the upstream before listing this API");
     }
+    if (input.listed && api.onchainStatus !== "registered") {
+      throw new ApiServiceError(
+        409,
+        `Register this API on-chain before listing it (GET /apis/${api.id}/register/prepare)`,
+      );
+    }
     changes.listed = input.listed;
   }
 
@@ -282,7 +356,8 @@ export async function updateApi(api: ApiRow, input: UpdateApiInput): Promise<Api
 /**
  * Prove the provider controls the upstream origin: it must serve
  * `zentrixpay-verification=<token>` at /.well-known/zentrixpay.txt.
- * On success the API is marked verified and listed.
+ * On success the API is marked verified, and listed once it is also
+ * registered on-chain.
  */
 export async function verifyOwnership(api: ApiRow): Promise<ApiRow> {
   let body: string;
@@ -316,7 +391,7 @@ export async function verifyOwnership(api: ApiRow): Promise<ApiRow> {
 
   const [row] = await db
     .update(apis)
-    .set({ ownershipVerifiedAt: new Date(), listed: true })
+    .set({ ownershipVerifiedAt: new Date(), listed: api.onchainStatus === "registered" })
     .where(eq(apis.id, api.id))
     .returning();
   return row;
@@ -346,6 +421,9 @@ export async function getApiStats(apiId: string) {
       revenue: sql<string>`coalesce(sum(${apiCalls.amount}::numeric) filter (where ${apiCalls.charged}), 0)::text`,
       uniquePayers: sql<number>`count(distinct ${apiCalls.payerAddress}) filter (where ${apiCalls.charged})::int`,
       avgDurationMs: sql<number>`coalesce(avg(${apiCalls.durationMs}), 0)::int`,
+      refundedCalls: sql<number>`count(*) filter (where ${apiCalls.refundStatus} = 'refunded')::int`,
+      refunded: sql<string>`coalesce(sum(${apiCalls.refundAmount}::numeric) filter (where ${apiCalls.refundStatus} = 'refunded'), 0)::text`,
+      netRevenue: sql<string>`(coalesce(sum(${apiCalls.amount}::numeric) filter (where ${apiCalls.charged}), 0) - coalesce(sum(${apiCalls.refundAmount}::numeric) filter (where ${apiCalls.refundStatus} = 'refunded'), 0))::text`,
     })
     .from(apiCalls)
     .where(eq(apiCalls.apiId, apiId));

@@ -223,6 +223,9 @@ importers:
       x402-stellar:
         specifier: ^0.2.0
         version: 0.2.0(@stellar/stellar-sdk@15.1.0)
+      yaml:
+        specifier: ^2.8.1
+        version: 2.9.0
       zod:
         specifier: ^4.3.6
         version: 4.4.3

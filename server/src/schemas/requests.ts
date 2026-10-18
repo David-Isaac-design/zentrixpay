@@ -144,6 +144,26 @@ const upstreamHeader = z
   })
   .strict();
 
+// Query parameter names the proxy may not overwrite with a provider secret.
+const upstreamQueryParam = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9._~-]+$/, "query parameter name contains invalid characters"),
+    value: z
+      .string()
+      .min(1)
+      .max(4096)
+      .refine((v) => !/[\r\n\0]/.test(v), "query parameter value must not contain line breaks"),
+  })
+  .strict();
+
+// OpenAPI 3 document: JSON/YAML text or an already-parsed JSON object. Size and
+// structure are checked in services/openApiSpec.ts.
+const openapiSpec = z.union([z.string().min(1), z.record(z.string(), z.unknown())]);
+
 const tagList = z.array(z.string().trim().min(1).max(32).toLowerCase()).max(10);
 
 export const PAYER_LIST_MAX = 500;
@@ -162,6 +182,8 @@ export const createApiSchema = z
     walletAddress: stellarAddress.optional(),
     allowedMethods: z.array(z.enum(API_METHODS)).min(1).default(["GET"]),
     upstreamHeader: upstreamHeader.optional(),
+    upstreamQueryParam: upstreamQueryParam.optional(),
+    openapiSpec: openapiSpec.optional(),
     timeoutMs: z.number().int().min(1000).optional(),
     tags: tagList.default([]),
     // Only these wallets may call the API; omit to allow everyone.
@@ -179,6 +201,8 @@ export const updateApiSchema = z
     walletAddress: stellarAddress.optional(),
     allowedMethods: z.array(z.enum(API_METHODS)).min(1).optional(),
     upstreamHeader: upstreamHeader.nullable().optional(),
+    upstreamQueryParam: upstreamQueryParam.nullable().optional(),
+    openapiSpec: openapiSpec.nullable().optional(),
     timeoutMs: z.number().int().min(1000).nullable().optional(),
     tags: tagList.optional(),
     // null removes the allowlist, opening the API to every wallet again.
